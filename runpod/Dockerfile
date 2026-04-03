@@ -28,10 +28,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ---------------------------------------------------------------------------
 RUN python -c "\
 from huggingface_hub import snapshot_download; \
-snapshot_download('Synthefy/migas-1.5',        revision='d99b2f8'); \
-snapshot_download('amazon/chronos-t5-small',   revision='main'); \
-snapshot_download('ProsusAI/finbert',           revision='main'); \
-print('All model weights downloaded.')"
+snapshot_download('Synthefy/migas-1.5', revision='d99b2f8'); \
+print('Migas-1.5 weights downloaded.')"
 
 # Copy worker source
 COPY handler.py .
