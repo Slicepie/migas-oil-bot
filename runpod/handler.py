@@ -29,11 +29,10 @@ from migaseval import MigasPipeline
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-print(f"[init] Loading Migas-1.5 with FinBERT embedder on {DEVICE}...")
+print(f"[init] Loading Migas-1.5 on {DEVICE}...")
 _pipeline = MigasPipeline.from_pretrained(
     "Synthefy/migas-1.5",
     device=DEVICE,
-    text_embedder="finbert",
 )
 
 print("[init] Ready.")
