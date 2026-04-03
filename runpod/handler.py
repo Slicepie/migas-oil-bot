@@ -14,6 +14,9 @@ Returns:
 }
 """
 
+import os
+os.environ.setdefault("HF_HOME", "/workspace/hf_cache")  # must be set before HF imports
+
 import runpod
 import torch
 import numpy as np

@@ -1,27 +1,37 @@
 # ---------------------------------------------------------------------------
 # migas-oil-bot · RunPod serverless worker
 # ---------------------------------------------------------------------------
-# Base image ships CUDA 12.1, cuDNN 8, Python 3.11, and a working pip.
-# See https://hub.docker.com/r/runpod/pytorch for available tags.
-# ---------------------------------------------------------------------------
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
-# System deps (git needed for any VCS pip installs; curl for healthchecks)
+# Consistent HuggingFace cache directory — mount a RunPod network volume
+# here to persist weights across worker restarts and avoid re-downloads.
+ENV HF_HOME=/workspace/hf_cache
+
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
  && rm -rf /var/lib/apt/lists/*
 
-# Python deps — install before copying source so layer is cached on re-builds
+# Python deps — layer cached unless requirements.txt changes
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Model weights are NOT baked into the image — they are downloaded on first
-# cold-start and cached to /root/.cache (HuggingFace default).
-# To avoid re-downloading on every new worker, mount a RunPod network volume
-# at /root/.cache and set TRANSFORMERS_CACHE=/root/.cache/huggingface.
+# ---------------------------------------------------------------------------
+# Bake model weights into the image at build time.
+# Cold starts go from ~minutes (downloading 2-3 GB) to ~seconds.
+#
+# Revisions are pinned to specific commits for reproducible builds.
+# Re-pin by checking the latest commit hash on each model's HF page.
+# ---------------------------------------------------------------------------
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('Synthefy/migas-1.5',        revision='main'); \
+snapshot_download('amazon/chronos-t5-small',   revision='main'); \
+snapshot_download('ProsusAI/finbert',           revision='main'); \
+print('All model weights downloaded.')"
 
 # Copy worker source
 COPY handler.py .
