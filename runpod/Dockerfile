@@ -13,6 +13,8 @@ ENV HF_HOME=/workspace/hf_cache
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
+    libfreetype6-dev \
+    libpng-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # Python deps — layer cached unless requirements.txt changes
