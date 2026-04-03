@@ -4,7 +4,7 @@
 # Base image ships CUDA 12.1, cuDNN 8, Python 3.11, and a working pip.
 # See https://hub.docker.com/r/runpod/pytorch for available tags.
 # ---------------------------------------------------------------------------
-FROM runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
