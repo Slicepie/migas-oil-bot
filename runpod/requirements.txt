@@ -1,5 +1,6 @@
+# torch is intentionally omitted — use the version pre-installed in the base image
+# to avoid torch/torchvision incompatibility
 runpod>=1.6.0
-torch>=2.2.0
 matplotlib>=3.7.0
 pandas>=2.0.0
 yfinance>=0.2.40
