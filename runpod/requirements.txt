@@ -1,6 +1,8 @@
 runpod>=1.6.0
 torch>=2.2.0
+pandas>=2.0.0
 yfinance>=0.2.40
-sentence-transformers>=3.0.0
-migaseval>=0.1.0
-numpy>=1.26.0
+sentence-transformers>=5.1.1
+chronos-forecasting
+huggingface-hub
+git+https://github.com/Synthefy/synthefy-migas.git

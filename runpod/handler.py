@@ -14,12 +14,11 @@ Returns:
 }
 """
 
-import os
 import runpod
 import torch
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from migaseval import Migas
+import pandas as pd
+from migaseval import MigasPipeline
 
 # ---------------------------------------------------------------------------
 # Model initialisation (runs once at container start, not per request)
@@ -27,12 +26,12 @@ from migaseval import Migas
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-print(f"[init] Loading FinBERT embedder on {DEVICE}...")
-_embedder = SentenceTransformer("ProsusAI/finbert", device=DEVICE)
-
-print("[init] Loading Migas-1.5...")
-_model = Migas.from_pretrained("migas-1.5", device=DEVICE)
-_model.eval()
+print(f"[init] Loading Migas-1.5 with FinBERT embedder on {DEVICE}...")
+_pipeline = MigasPipeline.from_pretrained(
+    "Synthefy/migas-1.5",
+    device=DEVICE,
+    text_embedder="finbert",
+)
 
 print("[init] Ready.")
 
@@ -40,24 +39,15 @@ print("[init] Ready.")
 # Helper utilities
 # ---------------------------------------------------------------------------
 
-def _encode_text(summary: str) -> np.ndarray:
-    """Encode a free-text summary with FinBERT → (1, hidden_dim) float32."""
-    with torch.no_grad():
-        embedding = _embedder.encode(
-            [summary],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-    return embedding  # shape (1, hidden_dim)
-
-
-def _parse_price_series(price_data: list[dict]) -> np.ndarray:
+def _build_dataframe(price_data: list[dict]) -> pd.DataFrame:
     """
-    Convert [{"t": ..., "y_t": float}, ...] to a (T,) float32 array.
-    Sorted by timestamp so callers don't have to guarantee order.
+    Convert [{"t": "YYYY-MM-DD", "y_t": float}, ...] to a DataFrame
+    sorted by date, as expected by MigasPipeline.predict_from_dataframe().
     """
-    sorted_data = sorted(price_data, key=lambda x: x["t"])
-    return np.array([row["y_t"] for row in sorted_data], dtype=np.float32)
+    df = pd.DataFrame(price_data)
+    df = df.rename(columns={"t": "t", "y_t": "y_t"})
+    df = df.sort_values("t").reset_index(drop=True)
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -81,22 +71,17 @@ def handler(job: dict) -> dict:
         return {"error": "price_data must contain at least one data point"}
 
     try:
-        # 1. Encode text context
-        text_embedding = _encode_text(summary)  # (1, hidden_dim)
+        # 1. Build DataFrame from price_data
+        df = _build_dataframe(price_data)
 
-        # 2. Build price series tensor
-        price_series = _parse_price_series(price_data)  # (T,)
+        # 2. Run Migas-1.5 inference — pipeline handles FinBERT encoding internally
+        forecast = _pipeline.predict_from_dataframe(
+            df,
+            pred_len=pred_len,
+            summaries=summary,
+        )
 
-        # 3. Run Migas-1.5 inference
-        with torch.no_grad():
-            forecast = _model.predict(
-                price_series=price_series,
-                text_embedding=text_embedding,
-                pred_len=pred_len,
-                device=DEVICE,
-            )  # expected: np.ndarray or list of length pred_len
-
-        # 4. Normalise output to a plain Python list of floats
+        # 3. Normalise output to a plain Python list of floats
         if isinstance(forecast, (np.ndarray, torch.Tensor)):
             forecast = forecast.flatten().tolist()
         else:
