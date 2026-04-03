@@ -7,6 +7,6 @@ matplotlib>=3.7.0
 pandas>=2.0.0
 yfinance>=0.2.40
 sentence-transformers>=5.1.1
-chronos-forecasting
+chronos-forecasting>=2.2.2
 huggingface-hub
 git+https://github.com/Synthefy/synthefy-migas.git
