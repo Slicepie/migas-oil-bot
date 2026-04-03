@@ -13,6 +13,7 @@ ENV HF_HOME=/workspace/hf_cache
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
+    pkg-config \
     libfreetype6-dev \
     libpng-dev \
  && rm -rf /var/lib/apt/lists/*

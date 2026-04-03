@@ -1,5 +1,6 @@
 runpod>=1.6.0
 torch>=2.2.0
+matplotlib>=3.7.0
 pandas>=2.0.0
 yfinance>=0.2.40
 sentence-transformers>=5.1.1
