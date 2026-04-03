@@ -22,6 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Patch migaseval: fix dtype= → torch_dtype= in chronos from_pretrained call.
+# migaseval/model/inference_utils.py passes dtype=torch.float32 but transformers
+# expects torch_dtype= and passes unknown kwargs to the model constructor, causing:
+# TypeError: Chronos2Model.__init__() got an unexpected keyword argument 'dtype'
+RUN sed -i \
+    's/dtype=torch\.float32/torch_dtype=torch.float32/g' \
+    /usr/local/lib/python3.11/dist-packages/migaseval/model/inference_utils.py
+
 # ---------------------------------------------------------------------------
 # Bake model weights into the image at build time.
 # Cold starts go from ~minutes (downloading 2-3 GB) to ~seconds.
