@@ -18,21 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download model weights at build time so they're baked into the image.
-# This avoids cold-start latency on the first request.
-# If the models are large, consider mounting a network volume instead and
-# removing these RUN steps — set MODEL_CACHE_DIR env var accordingly.
-RUN python - <<'EOF'
-from sentence_transformers import SentenceTransformer
-SentenceTransformer("ProsusAI/finbert")
-print("FinBERT downloaded.")
-EOF
-
-RUN python - <<'EOF'
-from migaseval import Migas
-Migas.from_pretrained("migas-1.5")
-print("Migas-1.5 downloaded.")
-EOF
+# Model weights are NOT baked into the image — they are downloaded on first
+# cold-start and cached to /root/.cache (HuggingFace default).
+# To avoid re-downloading on every new worker, mount a RunPod network volume
+# at /root/.cache and set TRANSFORMERS_CACHE=/root/.cache/huggingface.
 
 # Copy worker source
 COPY handler.py .
