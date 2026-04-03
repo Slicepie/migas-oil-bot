@@ -15,7 +15,14 @@ Returns:
 """
 
 import os
+import logging
 os.environ.setdefault("HF_HOME", "/workspace/hf_cache")  # must be set before HF imports
+
+# Suppress noisy library logs so real errors aren't throttled away
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("chronos").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 import runpod
 import torch
