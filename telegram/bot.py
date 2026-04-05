@@ -31,6 +31,7 @@ from news import (
     score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
     analogue_signal, format_analogue_signal,
 )
+from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
 
 load_dotenv()
 
@@ -248,6 +249,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛢️ *Migas Oil Bot*\n\n"
         "Commands:\n"
         "/signal — trader signal (15min/1hr/24hr) from post analogues\n"
+        "/stats — signal accuracy report\n"
         "/forecast — 16-day WTI forecast (Migas-1.5)\n"
         "/brent — 16-day Brent forecast (Migas-1.5)\n"
         "/alert 85.00 — alert when WTI hits $85\n"
@@ -354,6 +356,13 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @restricted
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show signal accuracy report."""
+    text = format_accuracy_report()
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+@restricted
 async def cmd_cancelalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid    = update.effective_user.id
     before = len(context.bot_data.get("alerts", []))
@@ -378,6 +387,18 @@ async def refresh_post_cache(context: ContextTypes.DEFAULT_TYPE):
         log.exception("Cache refresh failed")
 
 
+def _schedule_follow_ups(job_queue, signal_id: str, price_at_alert: float) -> None:
+    """Schedule 15min, 1hr, 24hr follow-up price checks for a signal."""
+    async def _check(ctx, window: str):
+        price = _current_wti()
+        if price:
+            follow_up(signal_id, window, price)
+
+    job_queue.run_once(lambda ctx: _check(ctx, "15m"), when=900)
+    job_queue.run_once(lambda ctx: _check(ctx, "1h"),  when=3600)
+    job_queue.run_once(lambda ctx: _check(ctx, "24h"), when=86400)
+
+
 async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
     """Run a short WTI forecast triggered by a high-scoring Trump post."""
     sc       = post["score"]
@@ -386,6 +407,19 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
     emoji    = score_emoji(sc)
     strength = "strongly" if abs(sc) >= 4 else "moderately"
     dirn     = "bullish 📈" if sc > 0 else "bearish 📉"
+
+    # Log signal for accuracy tracking
+    price_now = _current_wti()
+    if price_now:
+        signal_id = log_signal(
+            signal_type    = "auto_forecast",
+            direction      = "LONG" if sc > 0 else "SHORT",
+            score          = sc,
+            price_at_alert = price_now,
+            post_text      = text,
+            extra          = {"signals": signals},
+        )
+        _schedule_follow_ups(context.job_queue, signal_id, price_now)
 
     for uid in ALLOWED_USER_IDS:
         try:
@@ -497,6 +531,17 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
 
         context.bot_data["last_volume_alert"] = now
         notional_m = (current_vol * current_px * 1000) / 1_000_000
+
+        # Log for accuracy tracking — direction unknown, mark LONG as default
+        # (volume spikes before Iran posts have been bullish historically)
+        signal_id = log_signal(
+            signal_type    = "volume_spike",
+            direction      = "LONG",
+            score          = 0,
+            price_at_alert = current_px,
+            extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0)},
+        )
+        _schedule_follow_ups(context.job_queue, signal_id, current_px)
 
         log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional",
                  ratio, current_vol, avg_vol, notional_m)
@@ -689,6 +734,7 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("forecast",     cmd_forecast))
     ptb_app.add_handler(CommandHandler("brent",        cmd_brent))
     ptb_app.add_handler(CommandHandler("signal",       cmd_signal))
+    ptb_app.add_handler(CommandHandler("stats",        cmd_stats))
     ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
     ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
