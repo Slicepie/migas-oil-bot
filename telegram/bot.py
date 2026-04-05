@@ -413,8 +413,8 @@ def main():
     # Full cache refresh every 6 hours — runs at startup (first=10s) then every 6h
     app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
 
-    # Incremental poll for new Trump posts every 5 minutes (appends to cache, alerts if relevant)
-    app.job_queue.run_repeating(check_trump_posts, interval=300, first=60)
+    # Incremental poll for new Trump posts every 60 seconds
+    app.job_queue.run_repeating(check_trump_posts, interval=60, first=60)
 
     log.info("Migas Oil Bot starting…")
     app.run_polling(drop_pending_updates=True)
