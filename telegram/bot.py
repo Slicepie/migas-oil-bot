@@ -185,12 +185,20 @@ async def run_forecast(instrument: str, update: Update):
         summary, sources = build_live_summary(current_price, instrument)
 
         # Show what news was found
-        news_line = f"📰 Trump posts: {sources['trump_posts']} oil-relevant"
+        confirmed   = sources.get("confirmed", 0)
+        unconfirmed = sources.get("unconfirmed", 0)
+        avg_move    = sources.get("avg_move", 0.0)
+        net_label   = sources.get("net_label", "")
+        news_line   = (
+            f"📰 {confirmed} confirmed moves (avg {avg_move:+.1f}% USO), "
+            f"{unconfirmed} unconfirmed signals\n"
+            f"Signal: {net_label}"
+        )
         await msg.edit_text(f"⏳ Running Migas-1.5 forecast…\n{news_line}")
 
         forecast = get_forecast(price_data, summary)
         text     = format_forecast(forecast, current_price, instrument)
-        text    += f"\n\n{news_line}"
+        text    += f"\n\n📰 {net_label}"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as exc:
         log.exception("Forecast error")

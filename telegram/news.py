@@ -600,8 +600,9 @@ def append_new_posts(new_raw_posts: list[dict]) -> list[dict]:
     added      = [p for p in new_scored if p["text"] not in existing_texts]
 
     if added:
-        merged = added + existing  # newest first
-        merged.sort(key=lambda x: abs(x["score"]), reverse=True)
+        merged = added + existing
+        # Confirmed posts (real USO data) rank above unconfirmed (keyword-only)
+        merged.sort(key=lambda x: abs(x.get("uso_pct_5m") or 0), reverse=True)
         _write_cache(merged)
         log.info("Appended %d new scored posts to cache", len(added))
         return merged
@@ -613,7 +614,11 @@ def _score_raw_posts(raw_posts: list[dict]) -> list[dict]:
     """Score a list of raw posts (HF or Apify format). Returns only non-zero scored posts.
 
     HF rows include USO price reaction data; Apify rows do not.
-    Both are normalised into the same output schema.
+    Output schema is normalised across both sources.
+
+    Ranking priority:
+      1. Confirmed posts (have USO data, |move| >= 0.5%) — ranked by |uso_pct_5m|
+      2. Unconfirmed posts (keyword-only, e.g. new Apify posts) — ranked by |score|
     """
     scored = []
     for p in raw_posts:
@@ -621,30 +626,38 @@ def _score_raw_posts(raw_posts: list[dict]) -> list[dict]:
         if not text:
             continue
         score, signals = score_post(text)
-        if score != 0:
-            # USO reaction — present in HF rows, absent in Apify rows
-            uso_before = p.get("uso_5min_before")
-            uso_after  = p.get("uso_5min_after")
-            uso_1hr    = p.get("uso_1hr_after")
-            uso_pct_5m = None
-            uso_pct_1h = None
-            if uso_before and uso_after and uso_before > 0:
-                uso_pct_5m = round(((uso_after  - uso_before) / uso_before) * 100, 2)
-            if uso_before and uso_1hr and uso_before > 0:
-                uso_pct_1h = round(((uso_1hr    - uso_before) / uso_before) * 100, 2)
+        if score == 0:
+            continue
 
-            scored.append({
-                "text":       text,
-                "score":      score,
-                "signals":    signals,
-                "url":        p.get("url", ""),
-                "date":       p.get("date", ""),
-                "uso_pct_5m": uso_pct_5m,   # actual observed oil move, 5 min
-                "uso_pct_1h": uso_pct_1h,   # actual observed oil move, 1 hour
-            })
+        uso_before = p.get("uso_5min_before")
+        uso_after  = p.get("uso_5min_after")
+        uso_1hr    = p.get("uso_1hr_after")
+        uso_pct_5m = None
+        uso_pct_1h = None
+        if uso_before and uso_after and uso_before > 0:
+            uso_pct_5m = round(((uso_after - uso_before) / uso_before) * 100, 2)
+        if uso_before and uso_1hr and uso_before > 0:
+            uso_pct_1h = round(((uso_1hr   - uso_before) / uso_before) * 100, 2)
 
-    scored.sort(key=lambda x: abs(x["score"]), reverse=True)
-    return scored
+        # A post is "confirmed" if it has an actual USO market reaction >= 0.5%
+        confirmed = uso_pct_5m is not None and abs(uso_pct_5m) >= 0.5
+
+        scored.append({
+            "text":       text,
+            "score":      score,
+            "signals":    signals,
+            "url":        p.get("url", ""),
+            "date":       p.get("date", ""),
+            "time_et":    p.get("time_eastern", ""),
+            "uso_pct_5m": uso_pct_5m,
+            "uso_pct_1h": uso_pct_1h,
+            "confirmed":  confirmed,
+        })
+
+    # Confirmed first (by |uso_pct_5m|), then unconfirmed (by |score|)
+    confirmed_posts   = sorted([p for p in scored if     p["confirmed"]], key=lambda x: abs(x["uso_pct_5m"]), reverse=True)
+    unconfirmed_posts = sorted([p for p in scored if not p["confirmed"]], key=lambda x: abs(x["score"]),      reverse=True)
+    return confirmed_posts + unconfirmed_posts
 
 
 def get_scored_posts() -> list[dict]:
@@ -674,7 +687,13 @@ def get_relevant_trump_posts() -> list[str]:
 # ---------------------------------------------------------------------------
 
 def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[str, dict]:
-    """Build a Migas-ready summary from live Trump signals."""
+    """Build a Migas-ready summary from live Trump signals.
+
+    Uses actual USO % price moves (from HuggingFace) as the primary signal for
+    historical posts. Falls back to keyword scoring for new posts without price data.
+    FinBERT receives concrete financial language ('USO fell 6.97%') rather than
+    abstract invented scores.
+    """
     label = "WTI" if instrument == "wti" else "Brent"
     sensitivity = (
         "sensitive to US domestic production and SPR policy"
@@ -682,67 +701,96 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
         else "highly sensitive to OPEC+ decisions, Iran supply risk, and Strait of Hormuz disruptions"
     )
 
-    scored_posts = get_scored_posts()  # reads from cache — no Apify call
-    net_score    = sum(p["score"] for p in scored_posts)
-    top_posts    = scored_posts[:5]
+    all_posts   = get_scored_posts()
+    confirmed   = [p for p in all_posts if p.get("confirmed")]
+    unconfirmed = [p for p in all_posts if not p.get("confirmed")]
 
-    # Net signal interpretation
-    if net_score >= 5:
-        net_label = "STRONGLY BULLISH — major supply risk signals dominate"
-    elif net_score >= 2:
-        net_label = "BULLISH — geopolitical risk premium supported"
-    elif net_score >= 1:
-        net_label = "MILDLY BULLISH — slight upward pressure"
-    elif net_score == 0:
-        net_label = "NEUTRAL — mixed signals"
-    elif net_score >= -2:
-        net_label = "MILDLY BEARISH — slight downward pressure"
-    elif net_score >= -4:
-        net_label = "BEARISH — de-escalation signals dominate"
+    # --- Net signal: primary from confirmed USO moves, secondary from keyword scores ---
+    avg_move = (sum(p["uso_pct_5m"] for p in confirmed) / len(confirmed)) if confirmed else 0.0
+    max_post = max(confirmed, key=lambda x: abs(x["uso_pct_5m"])) if confirmed else None
+    max_move = max_post["uso_pct_5m"] if max_post else 0.0
+    kw_score = sum(p["score"] for p in unconfirmed)   # keyword signal for unconfirmed posts
+
+    # Net label: confirmed moves take precedence; keyword signal breaks ties
+    if avg_move <= -3 or (avg_move <= -1 and kw_score <= -3):
+        net_label = "STRONGLY BEARISH — confirmed oil sell-offs dominate"
+    elif avg_move <= -1 or kw_score <= -3:
+        net_label = "BEARISH — de-escalation or deal signals dominate"
+    elif avg_move >= 3 or (avg_move >= 1 and kw_score >= 3):
+        net_label = "STRONGLY BULLISH — confirmed oil spikes dominate"
+    elif avg_move >= 1 or kw_score >= 3:
+        net_label = "BULLISH — geopolitical risk premium signals"
+    elif kw_score >= 1:
+        net_label = "MILDLY BULLISH — unconfirmed escalation signals"
+    elif kw_score <= -1:
+        net_label = "MILDLY BEARISH — unconfirmed de-escalation signals"
     else:
-        net_label = "STRONGLY BEARISH — major supply increase or deal signals"
+        net_label = "NEUTRAL — no significant oil signals"
 
-    factual_lines = [
+    lines = [
         f"{label} crude oil is currently trading at ${current_price:.2f}/barrel. "
         f"This benchmark is {sensitivity}.",
-        f"",
-        f"Trump Truth Social signal analysis (last 2 months, {len(scored_posts)} relevant posts):",
-        f"Net oil signal: {score_emoji(net_score)} {net_signal_text(net_score)} (score: {net_score:+d})",
+        "",
+        "TRUMP TRUTH SOCIAL — OIL PRICE SIGNALS (last 60 days):",
     ]
 
-    if top_posts:
-        factual_lines.append("")
-        factual_lines.append("Top signals:")
-        for p in top_posts:
-            emoji  = score_emoji(p["score"])
-            labels = ", ".join(p["signals"])
-            uso_5m = p.get("uso_pct_5m")
+    # --- Confirmed section: actual USO % moves ---
+    top_confirmed = confirmed[:5]
+    if top_confirmed:
+        lines.append("")
+        lines.append(f"CONFIRMED MARKET REACTIONS ({len(confirmed)} posts with observed USO price data):")
+        for p in top_confirmed:
+            uso_5m = p["uso_pct_5m"]
             uso_1h = p.get("uso_pct_1h")
-            reaction = ""
-            if uso_5m is not None:
-                reaction = f" | USO: {uso_5m:+.1f}% (5m)"
+            dt     = p.get("date", "")
+            te     = (p.get("time_et") or "").strip()
+            timing = f"{dt} {te}".strip()
+            move   = f"USO {uso_5m:+.2f}% in 5 min"
             if uso_1h is not None:
-                reaction += f" / {uso_1h:+.1f}% (1h)"
-            factual_lines.append(
-                f"{emoji} [{p['score']:+d}]{reaction} {labels}: \"{p['text'][:180]}\""
-            )
+                move += f", {uso_1h:+.2f}% in 1 hr"
+            lines.append(f'  [{timing}] {move}: "{p["text"][:220]}"')
 
-    predictive_lines = [
-        f"Based on Trump's recent posts, the political signal is {net_label}. "
-        f"Ongoing Middle East conflict maintains a geopolitical risk premium. "
-        f"Any Strait of Hormuz disruption would be strongly bullish. "
-        f"A confirmed Iran deal or Russia/Ukraine ceasefire would be sharply bearish."
+        direction = "bearish" if avg_move < 0 else "bullish"
+        lines.append(f"  Average confirmed USO move: {avg_move:+.2f}% ({direction} across {len(confirmed)} posts)")
+        lines.append(f"  Largest single move: {max_move:+.2f}%")
+    else:
+        lines.append("")
+        lines.append("CONFIRMED MARKET REACTIONS: none available in current window.")
+
+    # --- Unconfirmed section: new posts without price data yet ---
+    top_unconfirmed = unconfirmed[:4]
+    if top_unconfirmed:
+        lines.append("")
+        lines.append("UNCONFIRMED SIGNALS (recent posts, price reaction not yet observed):")
+        for p in top_unconfirmed:
+            sc       = p["score"]
+            strength = "strongly" if abs(sc) >= 4 else ("moderately" if abs(sc) >= 2 else "mildly")
+            dirn     = "bullish" if sc > 0 else "bearish"
+            labels   = ", ".join(p["signals"])
+            lines.append(f'  [{strength} {dirn} — {labels}]: "{p["text"][:200]}"')
+
+    lines += [
+        "",
+        f"NET ASSESSMENT: {net_label}.",
     ]
 
-    summary = (
-        "FACTUAL SUMMARY:\n" + "\n".join(factual_lines) +
-        "\n\nPREDICTIVE SIGNALS:\n" + " ".join(predictive_lines)
+    predictive = (
+        f"Based on Trump's recent Truth Social posts, the net oil price signal is {net_label}. "
+        f"The largest confirmed price reaction was {max_move:+.2f}% in USO (oil ETF). "
+        f"Ongoing Middle East tensions maintain a geopolitical risk premium. "
+        f"A confirmed Iran deal or Strait of Hormuz resolution would be strongly bearish for oil. "
+        f"Any military escalation, oil infrastructure attack, or Hormuz blockade threat would be strongly bullish."
     )
 
+    summary = "FACTUAL SUMMARY:\n" + "\n".join(lines) + "\n\nPREDICTIVE SIGNALS:\n" + predictive
+
     sources = {
-        "trump_posts":    len(scored_posts),
-        "net_score":      net_score,
-        "net_label":      net_label,
+        "trump_posts":  len(all_posts),
+        "confirmed":    len(confirmed),
+        "unconfirmed":  len(unconfirmed),
+        "avg_move":     round(avg_move, 2),
+        "max_move":     round(max_move, 2),
+        "net_label":    net_label,
     }
 
     return summary, sources
