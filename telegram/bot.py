@@ -14,6 +14,7 @@ Brent is more sensitive to Hormuz/OPEC/Iran; WTI to US domestic policy.
 Private: only ALLOWED_USER_IDS can interact with the bot.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -21,10 +22,14 @@ from functools import wraps
 
 import requests
 import yfinance as yf
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from news import build_live_summary, get_relevant_trump_posts, refresh_cache, score_emoji
+from news import (
+    build_live_summary, get_relevant_trump_posts, refresh_cache,
+    score_emoji, append_new_posts, _score_raw_posts,
+)
 
 load_dotenv()
 
@@ -41,6 +46,10 @@ ALLOWED_USER_IDS = {1038492789}   # @slicepie5
 AUTO_FORECAST_MIN_SCORE      = 3    # |score| threshold to trigger auto-forecast
 AUTO_FORECAST_COOLDOWN_MIN   = 30   # minutes between auto-forecasts (avoid spam)
 AUTO_FORECAST_PRED_LEN       = 5    # days — shorter forecasts are more accurate for events
+
+WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "changeme")
+WEBHOOK_PORT    = int(os.environ.get("WEBHOOK_PORT", "8080"))
+APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -390,35 +399,153 @@ async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["alerts"] = remaining
 
 # ---------------------------------------------------------------------------
-# Main
+# Apify webhook server (aiohttp)
 # ---------------------------------------------------------------------------
 
-def main():
-    app = (
+async def handle_apify_webhook(request: web.Request) -> web.Response:
+    """Receive Apify webhook when a scheduled Truth Social scrape completes.
+
+    Apify POSTs to /webhook/{WEBHOOK_SECRET} when the actor run succeeds.
+    We fetch the run's dataset, score the posts, and fire alerts immediately —
+    no polling lag.
+    """
+    secret = request.match_info.get("secret", "")
+    if secret != WEBHOOK_SECRET:
+        log.warning("Webhook received with wrong secret")
+        return web.Response(status=401)
+
+    try:
+        body     = await request.json()
+        event    = body.get("eventType", "")
+        run_id   = body.get("eventData", {}).get("actorRunId", "")
+
+        if event != "ACTOR.RUN.SUCCEEDED" or not run_id:
+            return web.Response(status=200)  # ignore non-success events
+
+        log.info("Apify webhook received for run %s", run_id)
+
+        # Fetch posts from this specific run's dataset
+        resp = requests.get(
+            f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",
+            params={"token": APIFY_API_TOKEN},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw_posts = resp.json()
+
+        if not raw_posts:
+            return web.Response(status=200)
+
+        # Put in queue for the main loop to process
+        request.app["post_queue"].put_nowait(raw_posts)
+        log.info("Queued %d raw posts from webhook", len(raw_posts))
+
+    except Exception:
+        log.exception("Webhook handler error")
+
+    return web.Response(status=200)
+
+
+async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
+    """Score and process posts received via webhook, fire alerts if relevant."""
+    existing_texts = {p["text"] for p in __import__('news')._read_cache()}
+    append_new_posts(raw_posts)
+    new_scored = _score_raw_posts(raw_posts)
+    new_posts  = [p for p in new_scored if p["text"] not in existing_texts]
+
+    if not new_posts:
+        return
+
+    log.info("Webhook: %d new oil-relevant posts", len(new_posts))
+
+    # Reuse the same alert + auto-forecast logic as the polling job
+    # Inject into the PTB context via a fake job context
+    class _FakeContext:
+        def __init__(self):
+            self.bot      = ptb_app.bot
+            self.bot_data = ptb_app.bot_data
+
+    ctx = _FakeContext()
+
+    # Alert
+    for uid in ALLOWED_USER_IDS:
+        try:
+            lines = ["⚡ *Trump posted* (via webhook)\n"]
+            for p in new_posts[:3]:
+                lines.append(f"{score_emoji(p['score'])} `{p['score']:+d}` _{p['text'][:300]}_")
+            await ptb_app.bot.send_message(
+                chat_id=uid, text="\n\n".join(lines), parse_mode="Markdown"
+            )
+        except Exception:
+            log.exception("Webhook alert send failed")
+
+    # Auto-forecast
+    top = max(new_posts, key=lambda p: abs(p["score"]))
+    if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
+        last = ptb_app.bot_data.get("last_auto_forecast")
+        now  = datetime.now(timezone.utc)
+        if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
+            ptb_app.bot_data["last_auto_forecast"] = now
+            await trigger_auto_forecast(ctx, top)
+
+
+# ---------------------------------------------------------------------------
+# Main — runs PTB + aiohttp webhook server in the same event loop
+# ---------------------------------------------------------------------------
+
+async def main_async():
+    # Build PTB app
+    ptb_app = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    app.add_handler(CommandHandler("start",        cmd_start))
-    app.add_handler(CommandHandler("forecast",     cmd_forecast))
-    app.add_handler(CommandHandler("brent",        cmd_brent))
-    app.add_handler(CommandHandler("alert",        cmd_alert))
-    app.add_handler(CommandHandler("alerts",       cmd_alerts))
-    app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
+    ptb_app.add_handler(CommandHandler("start",        cmd_start))
+    ptb_app.add_handler(CommandHandler("forecast",     cmd_forecast))
+    ptb_app.add_handler(CommandHandler("brent",        cmd_brent))
+    ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
+    ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
+    ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
 
-    # Check price alerts every 5 minutes
-    app.job_queue.run_repeating(check_price_alerts, interval=300, first=15)
+    ptb_app.job_queue.run_repeating(check_price_alerts, interval=300,    first=15)
+    ptb_app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
+    ptb_app.job_queue.run_repeating(check_trump_posts,  interval=60,     first=60)
 
-    # Full cache refresh every 6 hours — runs at startup (first=10s) then every 6h
-    app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
+    # Build aiohttp webhook server
+    post_queue = asyncio.Queue()
+    aio_app    = web.Application()
+    aio_app["post_queue"] = post_queue
+    aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
 
-    # Incremental poll for new Trump posts every 60 seconds
-    app.job_queue.run_repeating(check_trump_posts, interval=60, first=60)
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT).start()
+    log.info("Webhook server listening on port %d", WEBHOOK_PORT)
 
-    log.info("Migas Oil Bot starting…")
-    app.run_polling(drop_pending_updates=True)
+    # Start PTB
+    await ptb_app.initialize()
+    await ptb_app.start()
+    await ptb_app.updater.start_polling(drop_pending_updates=True)
+    log.info("Migas Oil Bot started")
+
+    # Main loop — drain webhook queue
+    try:
+        while True:
+            try:
+                raw_posts = await asyncio.wait_for(post_queue.get(), timeout=5.0)
+                await process_webhook_posts(ptb_app, raw_posts)
+            except asyncio.TimeoutError:
+                pass   # nothing in queue, keep looping
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        log.info("Shutting down…")
+        await ptb_app.updater.stop()
+        await ptb_app.stop()
+        await ptb_app.shutdown()
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())

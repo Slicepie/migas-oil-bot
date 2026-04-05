@@ -2,15 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies first (separate layer — cached unless requirements change)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+ && rm -rf /root/.cache
 
 # Copy bot source files
-COPY bot.py .
-COPY news.py .
+COPY bot.py news.py ./
 
-# Webhook port (override via env if needed)
 EXPOSE 8080
 
 CMD ["python", "-u", "bot.py"]

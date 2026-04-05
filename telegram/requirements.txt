@@ -3,3 +3,4 @@ requests>=2.32.0
 yfinance>=0.2.40
 python-dotenv>=1.0.0
 feedparser>=6.0.0
+aiohttp>=3.9.0

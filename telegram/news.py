@@ -67,6 +67,9 @@ SIGNALS = [
       "hasn't even started",           # "hasn't even started destroying" context
       "bridges next",                  # "Bridges next, then Electric Power Plants" — escalation
       "electric power plants",         # bombing Iranian infrastructure
+      # Apr 5 2026 patch — "Tuesday will be Power Plant Day, and Bridge Day, all wrapped up in one, in Iran"
+      "power plant day",               # Trump's new naming convention for bombing campaigns
+      "bridge day",                    # "Bridge Day, all wrapped up in one, in Iran"
       "bomb tehran", "bombing tehran", "strike tehran", "hit tehran",
       "destroy tehran", "obliterate tehran",
       "military action against tehran",
@@ -104,7 +107,14 @@ SIGNALS = [
       "make a deal or",                # ultimatum framing — bullish threat
       "days or else",
       "iran deadline",
-      "gusher"], +5, "🔴 Hormuz/shipping threat"),
+      "gusher",
+      # Apr 5 2026 patch — "Open the Fuckin' Strait, you crazy bastards, or you'll be living in Hell"
+      "open the strait",               # Trump drops "Hormuz" in casual threats — still means Hormuz
+      "open the fuckin",               # "Open the Fuckin' Strait" — unmistakable Hormuz coercion
+      "open the f*ckin",               # censored variant
+      "open that strait",
+      "living in hell",                # ultimatum threat
+      "crazy bastards"], +5, "🔴 Hormuz/shipping threat"),
 
     # -------------------------------------------------------------------------
     # OIL / GAS INFRASTRUCTURE ATTACKS (strongly bullish)
