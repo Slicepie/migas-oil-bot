@@ -23,7 +23,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from news import build_live_summary, get_relevant_trump_posts
+from news import build_live_summary, get_relevant_trump_posts, refresh_cache
 
 load_dotenv()
 
@@ -259,9 +259,19 @@ async def cmd_cancelalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Alert job (runs every 5 minutes)
 # ---------------------------------------------------------------------------
 
+async def refresh_post_cache(context: ContextTypes.DEFAULT_TYPE):
+    """Refresh the full 2-month Trump post cache every 6 hours."""
+    log.info("Running scheduled cache refresh…")
+    try:
+        posts = refresh_cache()
+        log.info("Cache refresh complete: %d scored posts", len(posts))
+    except Exception:
+        log.exception("Cache refresh failed")
+
+
 async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
-    """Poll Truth Social for new oil-relevant Trump posts and alert immediately."""
-    posts = get_relevant_trump_posts(use_last_post_id=True)
+    """Poll Truth Social for new posts (incremental) and alert if oil-relevant."""
+    posts = get_relevant_trump_posts()
     if not posts:
         return
 
@@ -328,8 +338,11 @@ def main():
     # Check price alerts every 5 minutes
     app.job_queue.run_repeating(check_price_alerts, interval=300, first=15)
 
-    # Poll Trump Truth Social for new oil-relevant posts every 5 minutes
-    app.job_queue.run_repeating(check_trump_posts, interval=300, first=30)
+    # Full cache refresh every 6 hours — runs at startup (first=10s) then every 6h
+    app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
+
+    # Incremental poll for new Trump posts every 5 minutes (appends to cache, alerts if relevant)
+    app.job_queue.run_repeating(check_trump_posts, interval=300, first=60)
 
     log.info("Migas Oil Bot starting…")
     app.run_polling(drop_pending_updates=True)

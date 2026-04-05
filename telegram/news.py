@@ -7,8 +7,11 @@ and builds a structured summary for Migas-1.5.
 Signal scoring: -5 (strongly bearish for oil) to +5 (strongly bullish for oil)
 """
 
+import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 
@@ -17,6 +20,9 @@ log = logging.getLogger(__name__)
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
 APIFY_ACTOR_ID  = "muhammetakkurtt~truth-social-scraper"
 APIFY_ENDPOINT  = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
+
+CACHE_FILE      = Path(__file__).parent / "posts_cache.json"
+CACHE_TTL_HOURS = 6   # refresh full history every 6 hours
 
 # ---------------------------------------------------------------------------
 # Signal definitions — Trump's actual language mapped to oil price impact
@@ -268,13 +274,85 @@ def fetch_trump_posts(
         return []
 
 
-def get_scored_posts(use_last_post_id: bool = True) -> list[dict]:
-    """Fetch and score all Trump posts. Returns only posts with non-zero score."""
-    posts = fetch_trump_posts(use_last_post_id=use_last_post_id)
-    scored = []
+# ---------------------------------------------------------------------------
+# Post cache — full history pulled once, refreshed every CACHE_TTL_HOURS
+# ---------------------------------------------------------------------------
 
-    for p in posts:
-        text  = p.get("content", p.get("text", ""))
+def _cache_age_hours() -> float:
+    """Return age of cache in hours, or infinity if cache doesn't exist."""
+    if not CACHE_FILE.exists():
+        return float("inf")
+    try:
+        data = json.loads(CACHE_FILE.read_text())
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        age = datetime.now(timezone.utc) - fetched_at
+        return age.total_seconds() / 3600
+    except Exception:
+        return float("inf")
+
+
+def _read_cache() -> list[dict]:
+    """Read scored posts from cache file. Returns [] if missing or corrupt."""
+    try:
+        data = json.loads(CACHE_FILE.read_text())
+        return data.get("scored_posts", [])
+    except Exception:
+        return []
+
+
+def _write_cache(scored_posts: list[dict]) -> None:
+    """Write scored posts to cache with current timestamp."""
+    data = {
+        "fetched_at":   datetime.now(timezone.utc).isoformat(),
+        "scored_posts": scored_posts,
+    }
+    CACHE_FILE.write_text(json.dumps(data, indent=2))
+    log.info("Cache written: %d scored posts → %s", len(scored_posts), CACHE_FILE)
+
+
+def refresh_cache() -> list[dict]:
+    """Pull full 2-month history from Apify, score all posts, write cache.
+
+    Called once on bot startup and then every CACHE_TTL_HOURS by a background job.
+    Returns the scored posts list.
+    """
+    log.info("Refreshing Trump post cache (full 2-month pull)…")
+    posts = fetch_trump_posts(max_posts=500, use_last_post_id=False)
+    scored = _score_raw_posts(posts)
+    _write_cache(scored)
+    return scored
+
+
+def append_new_posts(new_raw_posts: list[dict]) -> list[dict]:
+    """Score new incremental posts and merge into cache (no duplicates).
+
+    Called by the 5-min polling job with useLastPostId=True results.
+    Returns the updated full scored list.
+    """
+    if not new_raw_posts:
+        return _read_cache()
+
+    existing = _read_cache()
+    existing_texts = {p["text"] for p in existing}
+
+    new_scored = _score_raw_posts(new_raw_posts)
+    added = [p for p in new_scored if p["text"] not in existing_texts]
+
+    if added:
+        merged = added + existing  # newest first
+        merged.sort(key=lambda x: abs(x["score"]), reverse=True)
+        _write_cache(merged)
+        log.info("Appended %d new scored posts to cache", len(added))
+        return merged
+
+    return existing
+
+
+def _score_raw_posts(raw_posts: list[dict]) -> list[dict]:
+    """Score a list of raw Apify post dicts. Returns only non-zero scored posts."""
+    scored = []
+    for p in raw_posts:
+        text = p.get("content", p.get("text", ""))
         if not text:
             continue
         score, signals = score_post(text)
@@ -285,16 +363,31 @@ def get_scored_posts(use_last_post_id: bool = True) -> list[dict]:
                 "signals": signals,
                 "url":     p.get("url", ""),
             })
-
-    # Sort by absolute score descending
     scored.sort(key=lambda x: abs(x["score"]), reverse=True)
-    log.info("%d/%d Trump posts have non-zero oil signal", len(scored), len(posts))
     return scored
 
 
-def get_relevant_trump_posts(use_last_post_id: bool = True) -> list[str]:
+def get_scored_posts() -> list[dict]:
+    """Return scored posts from cache, refreshing if stale or missing."""
+    if _cache_age_hours() >= CACHE_TTL_HOURS:
+        return refresh_cache()
+    cached = _read_cache()
+    if not cached:
+        return refresh_cache()
+    log.info("Using cached posts (%d scored, %.1fh old)", len(cached), _cache_age_hours())
+    return cached
+
+
+def get_relevant_trump_posts() -> list[str]:
     """Return list of oil-relevant Trump post texts (for backward compat)."""
-    return [p["text"] for p in get_scored_posts(use_last_post_id=use_last_post_id)]
+    # Incremental pull — only new posts since last check
+    new_raw = fetch_trump_posts(max_posts=50, use_last_post_id=True)
+    if not new_raw:
+        return []
+    updated = append_new_posts(new_raw)
+    # Return only the newly added texts (for alerting)
+    existing_before = {p["text"] for p in _read_cache()} - {p["text"] for p in _score_raw_posts(new_raw)}
+    return [p["text"] for p in _score_raw_posts(new_raw) if p["text"] not in existing_before]
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +403,7 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
         else "highly sensitive to OPEC+ decisions, Iran supply risk, and Strait of Hormuz disruptions"
     )
 
-    scored_posts = get_scored_posts(use_last_post_id=False)  # full 2-month history
+    scored_posts = get_scored_posts()  # reads from cache — no Apify call
     net_score    = sum(p["score"] for p in scored_posts)
     top_posts    = scored_posts[:5]
 
