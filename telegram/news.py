@@ -1,22 +1,37 @@
 """
 News aggregator for Migas Oil Bot.
 
-Pulls Trump Truth Social posts via Apify, scores them for oil price impact,
-and builds a structured summary for Migas-1.5.
+Historical data: HuggingFace dataset chrissoria/trump-truth-social
+  — free, 32k+ posts, includes pre-computed USO oil price reactions
+  — updated daily, covers all of Trump's second term
+
+Real-time alerts: Apify Truth Social scraper (incremental, 5-min polling)
+  — only used for new posts not yet in the HF dataset
 
 Signal scoring: -5 (strongly bearish for oil) to +5 (strongly bullish for oil)
+Ground truth anchor: Mar 23 2026 Iran peace post → -6.97% USO in 5 minutes = score -5
 """
 
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# HuggingFace dataset — primary historical source
+# ---------------------------------------------------------------------------
+HF_ENDPOINT  = "https://datasets-server.huggingface.co/rows"
+HF_DATASET   = "chrissoria/trump-truth-social"
+HF_DAYS      = 60   # how far back to pull for the Migas summary window
+
+# ---------------------------------------------------------------------------
+# Apify — real-time incremental polling only
+# ---------------------------------------------------------------------------
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
 APIFY_ACTOR_ID  = "muhammetakkurtt~truth-social-scraper"
 APIFY_ENDPOINT  = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
@@ -33,6 +48,8 @@ SIGNALS = [
 
     # -------------------------------------------------------------------------
     # IRAN — MILITARY / BOMBING (strongly bullish)
+    # Ground truth patches from Apr 3-4 2026 posts:
+    #   "Our Military hasn't even started destroying what's left in Iran. Bridges next, then Electric Power Plants."
     # -------------------------------------------------------------------------
     (["bomb iran", "bombing iran", "bombed iran",
       "strike iran", "striking iran", "struck iran",
@@ -43,10 +60,24 @@ SIGNALS = [
       "destroy iran", "obliterate iran",
       "iran will be hit", "iran is next",
       "iranian nuclear site", "nuclear facility",
-      "take out their nuclear"], +5, "🔴 Iran military strike"),
+      "take out their nuclear",
+      # Apr 3-4 2026 patches
+      "destroying what's left in iran",
+      "destroy what's left in iran",
+      "hasn't even started",           # "hasn't even started destroying" context
+      "bridges next",                  # "Bridges next, then Electric Power Plants" — escalation
+      "electric power plants",         # bombing Iranian infrastructure
+      "bomb tehran", "bombing tehran", "strike tehran", "hit tehran",
+      "destroy tehran", "obliterate tehran",
+      "military action against tehran",
+      "tehran will be hit", "tehran is next"], +5, "🔴 Iran military strike"),
 
     # -------------------------------------------------------------------------
-    # HORMUZ — CLOSED / BLOCKED (strongly bullish)
+    # HORMUZ — CLOSED / BLOCKED / SEIZED (strongly bullish)
+    # Ground truth patches from Apr 3-4 2026 posts:
+    #   "OPEN THE HORMUZ STRAIT, TAKE THE OIL, & MAKE A FORTUNE"
+    #   "Remember when I gave Iran ten days to MAKE A DEAL or OPEN UP THE HORMUZ STRAIT"
+    # Note: "open the hormuz strait" here = military seizure, NOT diplomatic (bullish)
     # -------------------------------------------------------------------------
     (["strait of hormuz", "hormuz closed", "hormuz blocked",
       "hormuz threatened", "close hormuz", "block hormuz",
@@ -55,7 +86,25 @@ SIGNALS = [
       "red sea attack", "houthi attack", "houthis attacked",
       "houthis struck", "shipping lane", "blockade",
       "persian gulf attack", "gulf attack",
-      "oil flow stopped", "oil supply cut"], +5, "🔴 Hormuz/shipping threat"),
+      "oil flow stopped", "oil supply cut",
+      # Apr 3-4 2026 patches — aggressive seizure framing
+      "hormuz strait",                 # Trump reverses word order vs "strait of hormuz"
+      "open the hormuz strait",        # military coercion context (paired with "take the oil")
+      "open up the hormuz strait",
+      "take the oil",                  # seizing Iranian oil
+      "keep the oil",                  # occupying Iranian oil fields
+      "seize the oil",
+      "take their oil",
+      "we take the oil",
+      "10 days to make a deal",
+      "ten days to make a deal",
+      "48 hours",                      # "48 hours before all Hell will reign down on them"
+      "all hell will reign",
+      "hell will reign",
+      "make a deal or",                # ultimatum framing — bullish threat
+      "days or else",
+      "iran deadline",
+      "gusher"], +5, "🔴 Hormuz/shipping threat"),
 
     # -------------------------------------------------------------------------
     # IRAN — ESCALATION / SANCTIONS TIGHTENING (bullish)
@@ -69,8 +118,12 @@ SIGNALS = [
       "hezbollah", "hamas funded by iran",
       "iran enriching", "iran nuclear program",
       "iran nukes", "iran weapons",
-      "iran 60 days", "iran deadline",
-      "iran deal is dead", "no deal with iran"], +3, "🟠 Iran escalation"),
+      "iran deal is dead", "no deal with iran",
+      # Deadline/ultimatum language
+      "days to make a deal",
+      "hours to comply",
+      "last chance for iran",
+      "last warning to iran"], +3, "🟠 Iran escalation"),
 
     # -------------------------------------------------------------------------
     # WAR / CONFLICT ESCALATION (bullish)
@@ -269,21 +322,78 @@ def score_emoji(score: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Apify scraper
+# HuggingFace dataset fetch — free historical source with USO price reactions
 # ---------------------------------------------------------------------------
 
-def fetch_trump_posts(
-    max_posts: int = 500,
-    use_last_post_id: bool = True,
-) -> list[dict]:
-    """Fetch Trump Truth Social posts via Apify.
+def fetch_posts_hf(days: int = HF_DAYS) -> list[dict]:
+    """Fetch Trump posts from HuggingFace dataset for the last N days.
 
-    Args:
-        max_posts: 500 covers ~2 months of posting history
-        use_last_post_id: True for incremental polling, False for full history pull
+    Free — no API key. Includes pre-computed USO oil ETF price reactions
+    (5min before/after, 1hr after) for every post. Updated daily.
+
+    Returns raw HF row dicts (newest first).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+    posts  = []
+    offset = 0
+
+    while True:
+        try:
+            resp = requests.get(
+                HF_ENDPOINT,
+                params={
+                    "dataset": HF_DATASET,
+                    "config":  "default",
+                    "split":   "train",
+                    "offset":  offset,
+                    "length":  100,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            rows = resp.json().get("rows", [])
+            if not rows:
+                break
+
+            done = False
+            for row in rows:
+                p = row["row"]
+                date_str = p.get("date", "")
+                if not date_str:
+                    continue
+                try:
+                    post_date = date.fromisoformat(date_str)
+                except ValueError:
+                    continue
+                if post_date < cutoff:
+                    done = True
+                    break
+                posts.append(p)
+
+            if done:
+                break
+            offset += 100
+
+        except Exception as exc:
+            log.error("HuggingFace fetch failed at offset %d: %s", offset, exc)
+            break
+
+    log.info("HuggingFace returned %d posts (last %d days)", len(posts), days)
+    return posts
+
+
+# ---------------------------------------------------------------------------
+# Apify — real-time incremental polling only (new posts not yet in HF)
+# ---------------------------------------------------------------------------
+
+def fetch_posts_apify_incremental(max_posts: int = 50) -> list[dict]:
+    """Fetch only new Trump posts via Apify (useLastPostId=True).
+
+    Used for the 5-minute real-time alert polling.
+    Returns raw Apify post dicts.
     """
     if not APIFY_API_TOKEN:
-        log.error("APIFY_API_TOKEN not set")
+        log.warning("APIFY_API_TOKEN not set — real-time polling disabled")
         return []
 
     try:
@@ -293,20 +403,20 @@ def fetch_trump_posts(
             json={
                 "username":      "realDonaldTrump",
                 "maxPosts":      max_posts,
-                "useLastPostId": use_last_post_id,
+                "useLastPostId": True,
                 "cleanContent":  True,
                 "onlyReplies":   False,
                 "onlyMedia":     False,
             },
-            timeout=120,
+            timeout=60,
         )
         resp.raise_for_status()
         posts = resp.json()
-        log.info("Apify returned %d Trump posts", len(posts))
+        log.info("Apify incremental poll returned %d new posts", len(posts))
         return posts
 
     except Exception as exc:
-        log.error("Apify fetch failed: %s", exc)
+        log.error("Apify incremental poll failed: %s", exc)
         return []
 
 
@@ -347,13 +457,14 @@ def _write_cache(scored_posts: list[dict]) -> None:
 
 
 def refresh_cache() -> list[dict]:
-    """Pull full 2-month history from Apify, score all posts, write cache.
+    """Pull 60-day history from HuggingFace, score all posts, write cache.
 
     Called once on bot startup and then every CACHE_TTL_HOURS by a background job.
+    HuggingFace is free and includes pre-computed USO price reactions.
     Returns the scored posts list.
     """
-    log.info("Refreshing Trump post cache (full 2-month pull)…")
-    posts = fetch_trump_posts(max_posts=500, use_last_post_id=False)
+    log.info("Refreshing Trump post cache from HuggingFace…")
+    posts  = fetch_posts_hf(days=HF_DAYS)
     scored = _score_raw_posts(posts)
     _write_cache(scored)
     return scored
@@ -362,17 +473,17 @@ def refresh_cache() -> list[dict]:
 def append_new_posts(new_raw_posts: list[dict]) -> list[dict]:
     """Score new incremental posts and merge into cache (no duplicates).
 
-    Called by the 5-min polling job with useLastPostId=True results.
+    Called by the 5-min polling job with Apify real-time results.
     Returns the updated full scored list.
     """
     if not new_raw_posts:
         return _read_cache()
 
-    existing = _read_cache()
+    existing       = _read_cache()
     existing_texts = {p["text"] for p in existing}
 
     new_scored = _score_raw_posts(new_raw_posts)
-    added = [p for p in new_scored if p["text"] not in existing_texts]
+    added      = [p for p in new_scored if p["text"] not in existing_texts]
 
     if added:
         merged = added + existing  # newest first
@@ -385,20 +496,39 @@ def append_new_posts(new_raw_posts: list[dict]) -> list[dict]:
 
 
 def _score_raw_posts(raw_posts: list[dict]) -> list[dict]:
-    """Score a list of raw Apify post dicts. Returns only non-zero scored posts."""
+    """Score a list of raw posts (HF or Apify format). Returns only non-zero scored posts.
+
+    HF rows include USO price reaction data; Apify rows do not.
+    Both are normalised into the same output schema.
+    """
     scored = []
     for p in raw_posts:
-        text = p.get("content", p.get("text", ""))
+        text = p.get("text", p.get("content", ""))
         if not text:
             continue
         score, signals = score_post(text)
         if score != 0:
+            # USO reaction — present in HF rows, absent in Apify rows
+            uso_before = p.get("uso_5min_before")
+            uso_after  = p.get("uso_5min_after")
+            uso_1hr    = p.get("uso_1hr_after")
+            uso_pct_5m = None
+            uso_pct_1h = None
+            if uso_before and uso_after and uso_before > 0:
+                uso_pct_5m = round(((uso_after  - uso_before) / uso_before) * 100, 2)
+            if uso_before and uso_1hr and uso_before > 0:
+                uso_pct_1h = round(((uso_1hr    - uso_before) / uso_before) * 100, 2)
+
             scored.append({
-                "text":    text,
-                "score":   score,
-                "signals": signals,
-                "url":     p.get("url", ""),
+                "text":       text,
+                "score":      score,
+                "signals":    signals,
+                "url":        p.get("url", ""),
+                "date":       p.get("date", ""),
+                "uso_pct_5m": uso_pct_5m,   # actual observed oil move, 5 min
+                "uso_pct_1h": uso_pct_1h,   # actual observed oil move, 1 hour
             })
+
     scored.sort(key=lambda x: abs(x["score"]), reverse=True)
     return scored
 
@@ -415,15 +545,14 @@ def get_scored_posts() -> list[dict]:
 
 
 def get_relevant_trump_posts() -> list[str]:
-    """Return list of oil-relevant Trump post texts (for backward compat)."""
-    # Incremental pull — only new posts since last check
-    new_raw = fetch_trump_posts(max_posts=50, use_last_post_id=True)
+    """Poll for new posts via Apify (real-time), append to cache, return new oil-relevant texts."""
+    existing_texts = {p["text"] for p in _read_cache()}
+    new_raw        = fetch_posts_apify_incremental()
     if not new_raw:
         return []
-    updated = append_new_posts(new_raw)
-    # Return only the newly added texts (for alerting)
-    existing_before = {p["text"] for p in _read_cache()} - {p["text"] for p in _score_raw_posts(new_raw)}
-    return [p["text"] for p in _score_raw_posts(new_raw) if p["text"] not in existing_before]
+    append_new_posts(new_raw)
+    new_scored = _score_raw_posts(new_raw)
+    return [p["text"] for p in new_scored if p["text"] not in existing_texts]
 
 
 # ---------------------------------------------------------------------------
@@ -473,8 +602,15 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
         for p in top_posts:
             emoji  = score_emoji(p["score"])
             labels = ", ".join(p["signals"])
+            uso_5m = p.get("uso_pct_5m")
+            uso_1h = p.get("uso_pct_1h")
+            reaction = ""
+            if uso_5m is not None:
+                reaction = f" | USO: {uso_5m:+.1f}% (5m)"
+            if uso_1h is not None:
+                reaction += f" / {uso_1h:+.1f}% (1h)"
             factual_lines.append(
-                f"{emoji} [{p['score']:+d}] {labels}: \"{p['text'][:200]}\""
+                f"{emoji} [{p['score']:+d}]{reaction} {labels}: \"{p['text'][:180]}\""
             )
 
     predictive_lines = [
