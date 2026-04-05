@@ -818,3 +818,166 @@ def net_signal_text(score: int) -> str:
     if score >= -1: return "MILDLY BEARISH"
     if score >= -3: return "BEARISH"
     return "STRONGLY BEARISH"
+
+
+# ---------------------------------------------------------------------------
+# Post-analogue signal estimate
+# ---------------------------------------------------------------------------
+
+def analogue_signal(post: dict) -> dict:
+    """Given a scored post, find historical confirmed analogues and estimate
+    the expected USO move at 15min, 1hr, and 24hr timeframes.
+
+    Uses confirmed posts from cache with matching score bracket.
+    USO 5min = 15min proxy (closest we have), 1hr = 1hr, 24hr extrapolated.
+
+    Returns a dict:
+    {
+        "score":          int,
+        "signals":        [str],
+        "direction":      "LONG" | "SHORT" | "NEUTRAL",
+        "n_analogues":    int,
+        "avg_15m":        float,   # avg USO % move (5min data as proxy)
+        "avg_1h":         float,
+        "est_24h":        float,   # extrapolated (1h * decay factor)
+        "hit_rate_15m":   float,   # % of analogues that moved in correct direction
+        "hit_rate_1h":    float,
+        "max_move_15m":   float,
+        "max_move_1h":    float,
+        "action":         str,     # plain-english trader instruction
+        "top_analogues":  [dict],  # up to 3 most similar confirmed posts
+    }
+    """
+    score   = post.get("score", 0)
+    signals = post.get("signals", [])
+
+    all_posts  = get_scored_posts()
+    confirmed  = [p for p in all_posts if p.get("confirmed")]
+
+    # Match posts in the same score bracket (±1 from post score, same direction)
+    if score > 0:
+        analogues = [p for p in confirmed if p.get("uso_pct_5m") is not None and p["uso_pct_5m"] > 0]
+        # Weight towards higher-score matches
+        analogues = sorted(analogues, key=lambda x: abs(x.get("score", 0) - score))
+    elif score < 0:
+        analogues = [p for p in confirmed if p.get("uso_pct_5m") is not None and p["uso_pct_5m"] < 0]
+        analogues = sorted(analogues, key=lambda x: abs(x.get("score", 0) - score))
+    else:
+        return {
+            "score": 0, "signals": signals, "direction": "NEUTRAL",
+            "n_analogues": 0, "avg_15m": 0.0, "avg_1h": 0.0, "est_24h": 0.0,
+            "hit_rate_15m": 0.0, "hit_rate_1h": 0.0,
+            "max_move_15m": 0.0, "max_move_1h": 0.0,
+            "action": "No signal — stay flat.",
+            "top_analogues": [],
+        }
+
+    # Closest score bracket first, take up to 20
+    close_analogues = [p for p in analogues if abs(p.get("score", 0) - score) <= 1][:20]
+    if not close_analogues:
+        close_analogues = analogues[:10]   # fall back to same-direction posts
+
+    n = len(close_analogues)
+    if n == 0:
+        return {
+            "score": score, "signals": signals, "direction": "NEUTRAL",
+            "n_analogues": 0, "avg_15m": 0.0, "avg_1h": 0.0, "est_24h": 0.0,
+            "hit_rate_15m": 0.0, "hit_rate_1h": 0.0,
+            "max_move_15m": 0.0, "max_move_1h": 0.0,
+            "action": "No confirmed analogues yet — signal unconfirmed.",
+            "top_analogues": [],
+        }
+
+    moves_15m = [p["uso_pct_5m"] for p in close_analogues]
+    moves_1h  = [p["uso_pct_1h"] for p in close_analogues if p.get("uso_pct_1h") is not None]
+
+    avg_15m     = sum(moves_15m) / len(moves_15m)
+    avg_1h      = sum(moves_1h)  / len(moves_1h) if moves_1h else avg_15m * 1.3
+    est_24h     = avg_1h * 1.5   # 24h decay: moves partially revert, partial persistence
+
+    direction   = "LONG" if score > 0 else "SHORT"
+    correct_dir = (lambda x: x > 0) if score > 0 else (lambda x: x < 0)
+
+    hit_rate_15m = sum(1 for m in moves_15m if correct_dir(m)) / len(moves_15m)
+    hit_rate_1h  = sum(1 for m in moves_1h  if correct_dir(m)) / len(moves_1h) if moves_1h else hit_rate_15m
+
+    max_move_15m = max(moves_15m, key=abs)
+    max_move_1h  = max(moves_1h,  key=abs) if moves_1h else avg_1h
+
+    # Trader action — scale with conviction
+    conviction = hit_rate_15m
+    size = "FULL SIZE" if conviction >= 0.75 else ("HALF SIZE" if conviction >= 0.60 else "SMALL SIZE")
+    side = "BUY" if direction == "LONG" else "SELL"
+
+    action = (
+        f"{side} WTI/USO — {size}\n"
+        f"Expected: {avg_15m:+.1f}% in 15min, {avg_1h:+.1f}% in 1hr, {est_24h:+.1f}% in 24hr\n"
+        f"Hit rate: {hit_rate_15m:.0%} directional accuracy ({n} analogues)\n"
+        f"Stop: reverse if {'-' if direction == 'LONG' else '+'}{abs(avg_15m) * 0.5:.1f}% within 15min"
+    )
+
+    top_analogues = sorted(close_analogues, key=lambda x: abs(x["uso_pct_5m"]), reverse=True)[:3]
+
+    return {
+        "score":         score,
+        "signals":       signals,
+        "direction":     direction,
+        "n_analogues":   n,
+        "avg_15m":       round(avg_15m, 2),
+        "avg_1h":        round(avg_1h, 2),
+        "est_24h":       round(est_24h, 2),
+        "hit_rate_15m":  round(hit_rate_15m, 2),
+        "hit_rate_1h":   round(hit_rate_1h, 2),
+        "max_move_15m":  round(max_move_15m, 2),
+        "max_move_1h":   round(max_move_1h, 2),
+        "action":        action,
+        "top_analogues": top_analogues,
+    }
+
+
+def format_analogue_signal(post: dict, current_price: float) -> str:
+    """Format analogue signal as a trader-ready Telegram message."""
+    r       = analogue_signal(post)
+    score   = r["score"]
+    emoji   = score_emoji(score)
+    side    = "📈 LONG" if r["direction"] == "LONG" else "📉 SHORT"
+    signals = ", ".join(r["signals"])
+
+    if r["n_analogues"] == 0:
+        return (
+            f"{emoji} *Signal: {net_signal_text(score)}* `{score:+d}`\n\n"
+            f"_{post.get('text', '')[:300]}_\n\n"
+            f"⚠️ No confirmed analogues yet — post is unconfirmed.\n"
+            f"Signals: {signals}"
+        )
+
+    lines = [
+        f"{emoji} *Trader Signal* — {side} `{score:+d}`",
+        f"",
+        f"_{post.get('text', '')[:250]}_",
+        f"",
+        f"*Signals:* {signals}",
+        f"",
+        f"*Expected moves* (based on {r['n_analogues']} similar posts):",
+        f"  15 min:  `{r['avg_15m']:+.1f}%`  (hit rate: {r['hit_rate_15m']:.0%})",
+        f"  1 hr:    `{r['avg_1h']:+.1f}%`  (hit rate: {r['hit_rate_1h']:.0%})",
+        f"  24 hr:   `{r['est_24h']:+.1f}%`  (extrapolated)",
+        f"  Max seen: `{r['max_move_15m']:+.1f}%` in 15min, `{r['max_move_1h']:+.1f}%` in 1hr",
+        f"",
+        f"*Action:*",
+    ]
+    for line in r["action"].split("\n"):
+        lines.append(f"  {line}")
+
+    if r["top_analogues"]:
+        lines.append("")
+        lines.append("*Best analogues:*")
+        for p in r["top_analogues"]:
+            dt  = p.get("date", "")
+            m5  = p["uso_pct_5m"]
+            m1h = p.get("uso_pct_1h")
+            m1h_str = f", {m1h:+.1f}% 1hr" if m1h else ""
+            lines.append(f"  [{dt}] `{m5:+.1f}% 15min{m1h_str}` — _{p['text'][:120]}_")
+
+    lines += ["", f"_Current WTI: ${current_price:.2f} · {r['n_analogues']} confirmed analogues_"]
+    return "\n".join(lines)

@@ -28,7 +28,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from news import (
     build_live_summary, get_relevant_trump_posts, refresh_cache,
-    score_emoji, append_new_posts, _score_raw_posts,
+    score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
+    analogue_signal, format_analogue_signal,
 )
 
 load_dotenv()
@@ -180,8 +181,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🛢️ *Migas Oil Bot*\n\n"
         "Commands:\n"
-        "/forecast — 16-day WTI forecast\n"
-        "/brent — 16-day Brent forecast\n"
+        "/signal — trader signal (15min/1hr/24hr) from post analogues\n"
+        "/forecast — 16-day WTI forecast (Migas-1.5)\n"
+        "/brent — 16-day Brent forecast (Migas-1.5)\n"
         "/alert 85.00 — alert when WTI hits $85\n"
         "/alerts — list active alerts\n"
         "/cancelalert — cancel all alerts\n\n"
@@ -264,6 +266,25 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, a in enumerate(alerts, 1):
         lines.append(f"{i}. `${a['target']:.2f}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@restricted
+async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show trader signal for the strongest recent Trump post."""
+    msg = await update.message.reply_text("⏳ Calculating signal…")
+    try:
+        _, current_price = fetch_prices("wti")
+        posts    = get_scored_posts()
+        # Pick the highest |score| post from the last 24h, else strongest overall
+        from datetime import date as _date
+        today    = _date.today().isoformat()
+        recent   = [p for p in posts if p.get("date", "") >= today]
+        top      = max(recent or posts, key=lambda p: abs(p.get("score", 0)))
+        text     = format_analogue_signal(top, current_price)
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as exc:
+        log.exception("Signal command error")
+        await msg.edit_text(f"❌ Error: {exc}")
 
 
 @restricted
@@ -402,6 +423,34 @@ async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
 # Apify webhook server (aiohttp)
 # ---------------------------------------------------------------------------
 
+async def handle_signal_api(request: web.Request) -> web.Response:
+    """GET /signal?secret=<WEBHOOK_SECRET>
+    Returns trader signal JSON for the strongest recent Trump post.
+    Designed for programmatic access — pipe into your own system.
+    """
+    secret = request.query.get("secret", "")
+    if secret != WEBHOOK_SECRET:
+        return web.Response(status=401, text="Unauthorized")
+
+    try:
+        _, current_price = fetch_prices("wti")
+        posts  = get_scored_posts()
+        from datetime import date as _date
+        today  = _date.today().isoformat()
+        recent = [p for p in posts if p.get("date", "") >= today]
+        top    = max(recent or posts, key=lambda p: abs(p.get("score", 0)))
+        result = analogue_signal(top)
+        result["current_wti"]  = round(current_price, 2)
+        result["post_text"]    = top.get("text", "")
+        result["post_date"]    = top.get("date", "")
+        # Remove non-serialisable keys
+        result.pop("top_analogues", None)
+        return web.json_response(result)
+    except Exception as exc:
+        log.exception("Signal API error")
+        return web.Response(status=500, text=str(exc))
+
+
 async def handle_apify_webhook(request: web.Request) -> web.Response:
     """Receive Apify webhook when a scheduled Truth Social scrape completes.
 
@@ -504,6 +553,7 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("start",        cmd_start))
     ptb_app.add_handler(CommandHandler("forecast",     cmd_forecast))
     ptb_app.add_handler(CommandHandler("brent",        cmd_brent))
+    ptb_app.add_handler(CommandHandler("signal",       cmd_signal))
     ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
     ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
@@ -517,6 +567,7 @@ async def main_async():
     aio_app    = web.Application()
     aio_app["post_queue"] = post_queue
     aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
+    aio_app.router.add_get("/signal",            handle_signal_api)
 
     runner = web.AppRunner(aio_app)
     await runner.setup()
