@@ -114,6 +114,9 @@ SIGNALS = [
 
     # -------------------------------------------------------------------------
     # IRAN — DEAL / SANCTIONS LIFTED (strongly bearish)
+    # Ground truth: Mar 23 2026 — "VERY GOOD AND PRODUCTIVE CONVERSATIONS WITH
+    # TEHRAN REGARDING A TOTAL RESOLUTION OF HOSTILITIES" → oil -10–15%
+    # Key lesson: Trump says "Tehran" not "Iran", uses "conversations" not "talks"
     # -------------------------------------------------------------------------
     (["deal with iran", "iran deal", "nuclear deal",
       "iranian deal", "iran agreement", "iran accord",
@@ -128,7 +131,40 @@ SIGNALS = [
       "iran compromise", "iran concession",
       "we made a deal with iran",
       "great deal with iran", "beautiful deal with iran",
-      "iran signed", "iran agreed"], -5, "🟢 Iran deal/sanctions lift"),
+      "iran signed", "iran agreed",
+      # Tehran-specific (Trump uses "Tehran" not "Iran" in diplomatic posts)
+      "conversations with tehran", "talks with tehran",
+      "meeting with tehran", "tehran agreed",
+      "tehran responded", "tehran reached out",
+      "tehran wants", "tehran willing",
+      "message from tehran", "letter from tehran",
+      "tehran has agreed", "tehran signed",
+      # Diplomatic language patterns (Mar 23 2026 event)
+      "resolution of hostilities",
+      "total resolution",
+      "end of hostilities",
+      "end hostilities",
+      "pause strikes",
+      "pausing strikes",
+      "halt strikes",
+      "halting strikes",
+      "ceasefire with iran",
+      "ceasefire with tehran",
+      "productive conversations",   # Trump's signature phrase for positive outcomes
+      "very good and productive",
+      "great and productive",
+      "iran wants peace",
+      "tehran wants peace",
+      "iran reached out",
+      "tehran reached out",
+      "iran is ready",
+      "tehran is ready",
+      "iran is open",
+      "progress with iran",
+      "progress with tehran",
+      "great progress on iran",
+      "breakthrough with iran",
+      "breakthrough with tehran"], -5, "🟢 Iran deal/sanctions lift"),
 
     # -------------------------------------------------------------------------
     # RUSSIA / UKRAINE — PEACE / CEASEFIRE (bearish)
