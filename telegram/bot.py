@@ -23,6 +23,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from news import build_live_summary
 
 load_dotenv()
 
@@ -178,12 +179,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_forecast(instrument: str, update: Update):
     """Shared forecast logic for WTI and Brent."""
     label = "WTI" if instrument == "wti" else "Brent"
-    msg = await update.message.reply_text(f"⏳ Fetching {label} prices and running forecast…")
+    msg = await update.message.reply_text(f"⏳ Fetching {label} prices and live news…")
     try:
         price_data, current_price = fetch_prices(instrument)
-        summary  = build_summary(current_price, instrument)
+        summary, sources = build_live_summary(current_price, instrument)
+
+        # Show what news was found
+        news_line = f"📰 Trump posts: {sources['trump_posts']} oil-relevant"
+        await msg.edit_text(f"⏳ Running Migas-1.5 forecast…\n{news_line}")
+
         forecast = get_forecast(price_data, summary)
         text     = format_forecast(forecast, current_price, instrument)
+        text    += f"\n\n{news_line}"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as exc:
         log.exception("Forecast error")
