@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from news import (
-    build_live_summary, get_relevant_trump_posts, refresh_cache,
+    build_live_summary, build_live_summary_override, get_relevant_trump_posts, refresh_cache,
     score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
     analogue_signal, format_analogue_signal,
 )
@@ -400,33 +400,51 @@ def _schedule_follow_ups(job_queue, signal_id: str, price_at_alert: float) -> No
 
 
 async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
-    """Run a short WTI forecast triggered by a high-scoring Trump post."""
+    """Run WTI forecast(s) triggered by a high-scoring Trump post.
+
+    For |score| >= 4: runs A/B test —
+      Forecast A: standard 60-day average net label
+      Forecast B: current post overrides net label (regime break)
+    For |score| < 4: runs Forecast A only.
+    """
     sc       = post["score"]
     signals  = ", ".join(post["signals"])
     text     = post["text"]
     emoji    = score_emoji(sc)
     strength = "strongly" if abs(sc) >= 4 else "moderately"
     dirn     = "bullish 📈" if sc > 0 else "bearish 📉"
+    ab_test  = abs(sc) >= 4
 
     # Log signal for accuracy tracking
     price_now = _current_wti()
     if price_now:
-        signal_id = log_signal(
-            signal_type    = "auto_forecast",
+        signal_id_a = log_signal(
+            signal_type    = "auto_forecast_a",
             direction      = "LONG" if sc > 0 else "SHORT",
             score          = sc,
             price_at_alert = price_now,
             post_text      = text,
-            extra          = {"signals": signals},
+            extra          = {"signals": signals, "variant": "A_standard"},
         )
-        _schedule_follow_ups(context.job_queue, signal_id, price_now)
+        _schedule_follow_ups(context.job_queue, signal_id_a, price_now)
+        if ab_test:
+            signal_id_b = log_signal(
+                signal_type    = "auto_forecast_b",
+                direction      = "LONG" if sc > 0 else "SHORT",
+                score          = sc,
+                price_at_alert = price_now,
+                post_text      = text,
+                extra          = {"signals": signals, "variant": "B_override"},
+            )
+            _schedule_follow_ups(context.job_queue, signal_id_b, price_now)
 
     for uid in ALLOWED_USER_IDS:
         try:
+            ab_note = " *(A/B test — 2 forecasts)*" if ab_test else ""
             msg = await context.bot.send_message(
                 chat_id=uid,
                 text=(
-                    f"⚡ *Auto-forecast triggered* {emoji} `{sc:+d}`\n\n"
+                    f"⚡ *Auto-forecast triggered* {emoji} `{sc:+d}`{ab_note}\n\n"
                     f"_{text[:300]}_\n\n"
                     f"*{strength} {dirn}* — {signals}\n\n"
                     f"⏳ Running {AUTO_FORECAST_PRED_LEN}-day WTI forecast…"
@@ -436,15 +454,35 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
 
             try:
                 price_data, current_price = fetch_prices("wti")
-                summary, sources          = build_live_summary(current_price, "wti")
-                forecast                  = get_forecast(price_data, summary, pred_len=AUTO_FORECAST_PRED_LEN)
-                net_label                 = sources.get("net_label", "")
-                result                    = (
-                    f"⚡ *Auto-forecast* {emoji} `{sc:+d}`\n\n"
-                    f"_{text[:200]}_\n\n"
-                    f"*{strength} {dirn}* — {signals}\n\n"
-                ) + format_forecast(forecast, current_price, "wti") + f"\n\n📰 {net_label}"
-                await msg.edit_text(result, parse_mode="Markdown")
+
+                # --- Forecast A: standard summary ---
+                summary_a, sources_a = build_live_summary(current_price, "wti")
+                forecast_a           = get_forecast(price_data, summary_a, pred_len=AUTO_FORECAST_PRED_LEN)
+                net_label_a          = sources_a.get("net_label", "")
+                result_a             = (
+                    f"⚡ *Forecast A — Standard* {emoji} `{sc:+d}`\n"
+                    f"_60-day average net label_\n\n"
+                    f"_{text[:150]}_\n\n"
+                ) + format_forecast(forecast_a, current_price, "wti") + f"\n\n📰 {net_label_a}"
+
+                if ab_test:
+                    # --- Forecast B: current post overrides net label ---
+                    summary_b, sources_b = build_live_summary_override(current_price, post, "wti")
+                    forecast_b           = get_forecast(price_data, summary_b, pred_len=AUTO_FORECAST_PRED_LEN)
+                    net_label_b          = sources_b.get("net_label", "")
+                    result_b             = (
+                        f"⚡ *Forecast B — Regime Override* {emoji} `{sc:+d}`\n"
+                        f"_Current post overrides 60-day trend_\n\n"
+                        f"_{text[:150]}_\n\n"
+                    ) + format_forecast(forecast_b, current_price, "wti") + f"\n\n📰 {net_label_b}"
+
+                    await msg.edit_text(result_a, parse_mode="Markdown")
+                    await context.bot.send_message(
+                        chat_id=uid, text=result_b, parse_mode="Markdown"
+                    )
+                else:
+                    result_a = result_a.replace("*Forecast A — Standard*", "*Auto-forecast*")
+                    await msg.edit_text(result_a, parse_mode="Markdown")
 
             except Exception as exc:
                 log.exception("Auto-forecast RunPod call failed")

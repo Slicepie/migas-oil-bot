@@ -810,6 +810,42 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
     return summary, sources
 
 
+def build_live_summary_override(current_price: float, trigger_post: dict, instrument: str = "wti") -> tuple[str, dict]:
+    """Build a Migas summary where the triggering post overrides the 60-day net label.
+
+    Used for Forecast B (A/B test) when |score| >= 4.
+    The current post IS the regime — historical average is just context.
+    """
+    # Get the standard summary first
+    summary, sources = build_live_summary(current_price, instrument)
+
+    score    = trigger_post.get("score", 0)
+    text     = trigger_post.get("text", "")
+    signals  = ", ".join(trigger_post.get("signals", []))
+    strength = "STRONGLY BULLISH" if score >= 4 else ("STRONGLY BEARISH" if score <= -4 else net_signal_text(score))
+    dirn     = "bullish — expect oil price spike" if score > 0 else "bearish — expect oil price drop"
+
+    override_block = (
+        f"\n\nREGIME OVERRIDE — EXTREME POST DETECTED (score {score:+d}):\n"
+        f'Trump just posted: "{text[:300]}"\n'
+        f"Signals: {signals}\n"
+        f"This post scores {score:+d} ({strength}). "
+        f"Treat this as a REGIME BREAK, not a trend continuation. "
+        f"The 60-day historical average is context only. "
+        f"The current post is {dirn}. "
+        f"Forecast should weight this post heavily over the historical trend."
+    )
+
+    # Replace the NET ASSESSMENT line with the override
+    summary_b = summary.replace(
+        f"NET ASSESSMENT: {sources['net_label']}.",
+        f"NET ASSESSMENT: {strength} — REGIME BREAK (current post overrides 60-day trend)."
+    ) + override_block
+
+    sources_b = {**sources, "net_label": strength, "override": True}
+    return summary_b, sources_b
+
+
 def net_signal_text(score: int) -> str:
     if score >= 4:  return "STRONGLY BULLISH"
     if score >= 2:  return "BULLISH"
