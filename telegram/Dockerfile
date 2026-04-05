@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
  && rm -rf /root/.cache
 
 # Copy bot source files
-COPY bot.py news.py ./
+COPY bot.py news.py tracker.py ./
 
 EXPOSE 8080
 
