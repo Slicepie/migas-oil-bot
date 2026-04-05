@@ -2,7 +2,7 @@
 News aggregator for Migas Oil Bot.
 
 Currently pulls:
-- Trump posts from Truth Social RSS feed (filtered for oil/energy relevance)
+- Trump posts from Truth Social via Apify scraper
 
 Planned:
 - OPEC press releases
@@ -11,79 +11,70 @@ Planned:
 """
 
 import logging
-import re
+import os
 from datetime import datetime, timezone
-from typing import Optional
 
 import requests
-import feedparser
 
 log = logging.getLogger(__name__)
+
+APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
+APIFY_ACTOR_ID  = "muhammetakkurtt~truth-social-scraper"
+APIFY_ENDPOINT  = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
 
 # ---------------------------------------------------------------------------
 # Oil/energy relevance keywords
 # ---------------------------------------------------------------------------
 
 OIL_KEYWORDS = [
-    # commodities
     "oil", "gas", "energy", "crude", "petroleum", "fuel", "gasoline",
     "opec", "barrel", "brent", "wti", "lng", "pipeline",
-    # geopolitical
     "iran", "hormuz", "saudi", "russia", "ukraine", "middle east",
-    "sanctions", "embargo", "supply",
-    # policy
-    "drill", "refinery", "spr", "strategic reserve",
-    "tariff", "import", "export", "production",
+    "sanctions", "embargo", "supply", "drill", "refinery", "spr",
+    "strategic reserve", "tariff", "production", "prices",
 ]
 
 # ---------------------------------------------------------------------------
-# Truth Social — Trump RSS
+# Apify Trump scraper
 # ---------------------------------------------------------------------------
 
-TRUMP_RSS_URL = "https://truthsocial.com/@realDonaldTrump.rss"
-
-
-def fetch_trump_posts(max_posts: int = 20, days_back: int = 7) -> list[dict]:
-    """Fetch recent Trump posts from Truth Social RSS.
+def fetch_trump_posts(max_posts: int = 20, use_last_post_id: bool = True) -> list[dict]:
+    """Fetch Trump's latest Truth Social posts via Apify.
 
     Args:
         max_posts: Maximum number of posts to fetch.
-        days_back: Only return posts from the last N days.
+        use_last_post_id: If True, only fetch new posts since last run.
 
     Returns:
-        List of dicts with keys: title, text, published, url, relevant
+        List of post dicts with keys: id, content, created_at, url
     """
-    try:
-        feed = feedparser.parse(TRUMP_RSS_URL)
-    except Exception as exc:
-        log.error("Failed to fetch Truth Social RSS: %s", exc)
+    if not APIFY_API_TOKEN:
+        log.error("APIFY_API_TOKEN not set")
         return []
 
-    cutoff = datetime.now(timezone.utc).timestamp() - (days_back * 86400)
-    posts  = []
+    try:
+        resp = requests.post(
+            APIFY_ENDPOINT,
+            params={"token": APIFY_API_TOKEN},
+            json={
+                "username":       "realDonaldTrump",
+                "maxPosts":       max_posts,
+                "useLastPostId":  use_last_post_id,
+                "cleanContent":   True,
+                "onlyReplies":    False,
+                "onlyMedia":      False,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        posts = resp.json()
 
-    for entry in feed.entries[:max_posts]:
-        # Parse timestamp
-        published_ts = None
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
-            published_ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).timestamp()
+        log.info("Apify returned %d Trump posts", len(posts))
+        return posts
 
-        if published_ts and published_ts < cutoff:
-            continue
-
-        # Strip HTML tags from content
-        raw_text = entry.get("summary", entry.get("title", ""))
-        text     = re.sub(r"<[^>]+>", " ", raw_text).strip()
-        text     = re.sub(r"\s+", " ", text)
-
-        posts.append({
-            "text":      text,
-            "published": entry.get("published", ""),
-            "url":       entry.get("link", ""),
-            "relevant":  is_oil_relevant(text),
-        })
-
-    return posts
+    except Exception as exc:
+        log.error("Apify fetch failed: %s", exc)
+        return []
 
 
 def is_oil_relevant(text: str) -> bool:
@@ -92,14 +83,15 @@ def is_oil_relevant(text: str) -> bool:
     return any(kw in text_lower for kw in OIL_KEYWORDS)
 
 
-def get_relevant_trump_posts(days_back: int = 7) -> list[str]:
-    """Return list of oil-relevant Trump post texts from the last N days."""
-    posts = fetch_trump_posts(days_back=days_back)
-    relevant = [p["text"] for p in posts if p["relevant"]]
-    log.info(
-        "Trump posts: %d fetched, %d oil-relevant (last %d days)",
-        len(posts), len(relevant), days_back,
-    )
+def get_relevant_trump_posts(use_last_post_id: bool = True) -> list[str]:
+    """Return list of oil-relevant Trump post texts."""
+    posts = fetch_trump_posts(use_last_post_id=use_last_post_id)
+    relevant = [
+        p.get("content", p.get("text", ""))
+        for p in posts
+        if is_oil_relevant(p.get("content", p.get("text", "")))
+    ]
+    log.info("%d/%d Trump posts are oil-relevant", len(relevant), len(posts))
     return relevant
 
 
@@ -121,9 +113,8 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
         else "highly sensitive to OPEC+ decisions, Iran supply risk, and Strait of Hormuz disruptions"
     )
 
-    trump_posts = get_relevant_trump_posts(days_back=7)
+    trump_posts = get_relevant_trump_posts()
 
-    # Build factual section
     factual_parts = [
         f"{label} crude oil is currently trading at ${current_price:.2f}/barrel. "
         f"This benchmark is {sensitivity}. "
@@ -136,7 +127,6 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
             + "\n".join(f"- {p[:300]}" for p in trump_posts[:5])
         )
 
-    # Build predictive section
     predictive_parts = [
         "Ongoing Middle East conflict maintains a geopolitical risk premium. "
         "Any Strait of Hormuz disruption would be strongly bullish. "
@@ -157,8 +147,5 @@ def build_live_summary(current_price: float, instrument: str = "wti") -> tuple[s
         + " ".join(predictive_parts)
     )
 
-    sources = {
-        "trump_posts": len(trump_posts),
-    }
-
+    sources = {"trump_posts": len(trump_posts)}
     return summary, sources

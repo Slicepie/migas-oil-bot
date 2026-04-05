@@ -23,7 +23,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from news import build_live_summary
+from news import build_live_summary, get_relevant_trump_posts
 
 load_dotenv()
 
@@ -259,6 +259,21 @@ async def cmd_cancelalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Alert job (runs every 5 minutes)
 # ---------------------------------------------------------------------------
 
+async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
+    """Poll Truth Social for new oil-relevant Trump posts and alert immediately."""
+    posts = get_relevant_trump_posts(use_last_post_id=True)
+    if not posts:
+        return
+
+    for uid in ALLOWED_USER_IDS:
+        try:
+            text = f"🚨 *Trump posted about oil/energy*\n\n"
+            text += "\n\n".join(f"_{p[:400]}_" for p in posts[:3])
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+        except Exception:
+            log.exception("Failed to send Trump alert to %s", uid)
+
+
 async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
     alerts = context.bot_data.get("alerts", [])
     if not alerts:
@@ -312,6 +327,9 @@ def main():
 
     # Check price alerts every 5 minutes
     app.job_queue.run_repeating(check_price_alerts, interval=300, first=15)
+
+    # Poll Trump Truth Social for new oil-relevant posts every 5 minutes
+    app.job_queue.run_repeating(check_trump_posts, interval=300, first=30)
 
     log.info("Migas Oil Bot starting…")
     app.run_polling(drop_pending_updates=True)
