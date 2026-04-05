@@ -107,7 +107,31 @@ SIGNALS = [
       "gusher"], +5, "🔴 Hormuz/shipping threat"),
 
     # -------------------------------------------------------------------------
+    # OIL / GAS INFRASTRUCTURE ATTACKS (strongly bullish)
+    # Ground truth: Mar 19 2026 — Israel hits South Pars Gas Field in Iran
+    # Any attack on oil/gas production = immediate supply disruption signal
+    # -------------------------------------------------------------------------
+    (["south pars",                          # Iran's largest gas field
+      "south pars gas field",
+      "oil field in iran", "gas field in iran",
+      "oil field attack", "gas field attack",
+      "oil infrastructure", "gas infrastructure",
+      "refinery attack", "refinery hit", "refinery struck",
+      "oil facility", "gas facility",
+      "oil platform attack", "rig attack",
+      "aramco attack", "aramco hit", "aramco struck",
+      "sabotage oil", "sabotage pipeline",
+      "pipeline exploded", "pipeline attack",
+      "oil terminal attack"], +5, "🔴 Oil/gas infrastructure attack"),
+
+    # -------------------------------------------------------------------------
     # IRAN — ESCALATION / SANCTIONS TIGHTENING (bullish)
+    # Ground truth patches Mar 2026:
+    #   "Iranian Terror State" / "terrorist regime of Iran"  → +3
+    #   "finished off what's left of the Iranian Terror State" → +3
+    #   "state sponsor of terror / putting them out of business" → +3
+    #   "evil Empire, Iran, from having Nuclear Weapons" → +3
+    #   "so called 'Strait?'" (Trump's oblique Hormuz reference) → +3
     # -------------------------------------------------------------------------
     (["maximum pressure", "sanctions on iran", "sanction iran",
       "iranian sanctions", "tighten sanctions", "new sanctions",
@@ -123,10 +147,32 @@ SIGNALS = [
       "days to make a deal",
       "hours to comply",
       "last chance for iran",
-      "last warning to iran"], +3, "🟠 Iran escalation"),
+      "last warning to iran",
+      # Mar 2026 patches — Trump's actual language for Iran escalation
+      "terrorist regime of iran", "terrorist regime",
+      "iranian terror state", "terror state",
+      "state sponsor of terror",
+      "finish off iran", "finishing off iran", "finished off",
+      "putting iran out of business", "putting them out of business",
+      "evil empire",                         # "stopping an evil Empire, Iran"
+      "from having nuclear weapons",         # "stopping Iran from having Nuclear Weapons"
+      "iran nuclear weapons", "nuclear weapons program",
+      "so called strait", "so called straight",  # Trump's oblique Hormuz reference
+      "be responsible for the strait",
+      "be responsible for the straight",
+      # War-continues / no-deal language (fixes "no deal with iran" false match)
+      "no deal with iran",                   # explicit rejection of deal = war continues
+      "no deal with tehran",
+      "unconditional surrender",             # "no deal except unconditional surrender"
+      "will not make a deal",
+      "not making a deal with iran",
+      "beat to hell",                        # "Iran is being beat to HELL"
+      "being destroyed",                     # "Iran is being destroyed"
+      "being decimated"], +3, "🟠 Iran escalation"),
 
     # -------------------------------------------------------------------------
     # WAR / CONFLICT ESCALATION (bullish)
+    # Ground truth: Mar 7 2026 — UK aircraft carriers Middle East (+10.97% USO day)
     # -------------------------------------------------------------------------
     (["world war", "major war", "war is coming",
       "troops deployed", "sending troops",
@@ -137,7 +183,14 @@ SIGNALS = [
       "attack on israel", "israel attacked",
       "middle east war", "regional war",
       "drone attack", "missile attack",
-      "explosion", "explosions"], +2, "🟠 War escalation"),
+      "explosion", "explosions",
+      # Mar 2026 patches
+      "aircraft carriers to the middle east",
+      "carriers to the middle east",
+      "aircraft carrier to the middle east",
+      "sending carriers",
+      "naval forces to the",
+      "warships to the middle east"], +2, "🟠 War escalation"),
 
     # -------------------------------------------------------------------------
     # SAUDI / OPEC — PRODUCTION CUT (bullish)
@@ -171,7 +224,7 @@ SIGNALS = [
     # TEHRAN REGARDING A TOTAL RESOLUTION OF HOSTILITIES" → oil -10–15%
     # Key lesson: Trump says "Tehran" not "Iran", uses "conversations" not "talks"
     # -------------------------------------------------------------------------
-    (["deal with iran", "iran deal", "nuclear deal",
+    (["iran deal", "nuclear deal",
       "iranian deal", "iran agreement", "iran accord",
       "lift sanctions on iran", "lifting iran sanctions",
       "remove iran sanctions", "end iran sanctions",
@@ -247,6 +300,67 @@ SIGNALS = [
       "houthis surrendered", "red sea safe",
       "tankers safe", "oil flowing",
       "supply restored", "supply secured"], -3, "🟢 Hormuz/shipping safe"),
+
+    # -------------------------------------------------------------------------
+    # IRAN — DEFEATED / WAR ENDING (bearish)
+    # Ground truth patches Mar 2026 — as Iran gets destroyed, supply risk resolves
+    #   "blown Iran off the map...their navy and air force are dead...want to make a deal" → -6.97% USO
+    #   "death of Iran" → -6.97% USO
+    #   "Iran totally defeated and wants a deal" → -3.14% USO
+    #   "Iran's Navy is gone, Air Force is no longer" → -3.05% USO
+    #   "JUST LIKE IRAN ITSELF, THOSE PLANS ARE NOW DEAD" → -3.14% USO
+    #   "Militarily ineffective and weak" → -3.14% USO
+    # Key insight: Iran being destroyed = war is ENDING = oil supply risk resolves = bearish
+    # -------------------------------------------------------------------------
+    (["death of iran",
+      "iran is dead", "iran itself is dead",
+      "iran is defeated", "iran is totally defeated",
+      "totally defeated iran", "totally defeated and wants",
+      "iran is gone", "iran is finished", "iran is no more",
+      "iran is done",
+      "iran's navy is gone", "their navy is gone",
+      "navy and air force are dead", "navy is dead",
+      "iran's air force is gone", "air force is no longer",
+      "their air force is gone", "air force are dead",
+      "iran has no defense", "they have no defense", "absolutely no defense",
+      "iran's military is gone", "iran has no military",
+      "iran is militarily dead", "militarily ineffective",
+      "iran is weak", "iran is helpless",
+      "blown iran off the map",            # "we've blown Iran off the map"
+      "blown off the map",
+      "iran's plans are dead", "plans are now dead",
+      "just like iran itself",             # "JUST LIKE IRAN ITSELF, THOSE PLANS ARE NOW DEAD"
+      "iran wants to make a deal",         # Iran seeking exit = pre-cursor to deal
+      "iran wants a deal",
+      "they want to make a deal",          # Trump referring to Iran wanting out
+      "wants to make a deal",
+      "iran is seeking a deal",
+      "iran is begging",
+      "iran is on its knees",
+      "iran's leadership is gone",
+      "leadership is gone",
+      "iran's missiles are gone", "their missiles are gone",
+      "iran's drones are gone",
+      "we are winning against iran",       # war progressing toward end
+      "iran is losing",
+      "iran has lost",
+      # Winding-down language (Mar 20 2026: "winding down our great Military efforts in Iran")
+      "winding down our military",
+      "winding down military",
+      "wind down our military",
+      "winding down in iran",
+      "winding down the war",
+      "meeting our objectives",            # "close to meeting objectives" = war ending
+      "mission accomplished",
+      "mission is accomplished",
+      # Iran surrender language
+      "iran has surrendered", "iran surrendered",
+      "iran apologized and surrendered",
+      "apologized and surrendered",
+      "iran is surrendering",
+      "iran capitulated", "iran has capitulated",
+      "iran waved the white flag",
+      "iran gave up"], -3, "🟢 Iran defeated/war ending"),
 
     # -------------------------------------------------------------------------
     # IRAN — DE-ESCALATION (bearish)
