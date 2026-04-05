@@ -84,6 +84,72 @@ TICKERS = {
     "brent": ("BZ=F",  "Brent"),
 }
 
+# ---------------------------------------------------------------------------
+# Volume spike detection config
+# ---------------------------------------------------------------------------
+VOLUME_SPIKE_MULTIPLIER  = 3.0    # alert if current 5-min vol > 3x hourly baseline
+VOLUME_BASELINE_DAYS     = 14     # days of hourly history to build baseline
+VOLUME_POST_LOCKOUT_MIN  = 60     # ignore spikes if Trump posted within this many minutes
+VOLUME_COOLDOWN_MIN      = 30     # minimum minutes between volume spike alerts
+
+# Hourly baseline cache — rebuilt every 24h
+_volume_baseline: dict[int, float] = {}   # {hour_of_day: avg_5min_volume}
+_volume_baseline_built: datetime | None = None
+
+
+def _build_volume_baseline() -> dict[int, float]:
+    """Build average 5-min CL=F volume by hour-of-day from last 14 days."""
+    import pandas as pd
+    ticker = yf.Ticker("CL=F")
+    hist   = ticker.history(period=f"{VOLUME_BASELINE_DAYS}d", interval="1h")[["Volume"]]
+    hist.index = pd.to_datetime(hist.index)
+    hist["hour"] = hist.index.hour
+    baseline = hist.groupby("hour")["Volume"].mean().to_dict()
+    log.info("Volume baseline built: %d hours, avg=%.0f", len(baseline), sum(baseline.values()) / max(len(baseline), 1))
+    return baseline
+
+
+def _get_volume_baseline() -> dict[int, float]:
+    """Return cached baseline, rebuilding if older than 24h."""
+    global _volume_baseline, _volume_baseline_built
+    now = datetime.now(timezone.utc)
+    if (
+        not _volume_baseline
+        or _volume_baseline_built is None
+        or (now - _volume_baseline_built).total_seconds() > 86400
+    ):
+        _volume_baseline       = _build_volume_baseline()
+        _volume_baseline_built = now
+    return _volume_baseline
+
+
+def _last_trump_post_age_minutes() -> float:
+    """Return minutes since the most recent Trump post in cache, or infinity."""
+    from news import _read_cache
+    posts = _read_cache()
+    if not posts:
+        return float("inf")
+    # Find most recent post with a date+time
+    now = datetime.now(timezone.utc)
+    most_recent = None
+    for p in posts:
+        date_str = p.get("date", "")
+        time_str = p.get("time_et", "") or "00:00:00"
+        if not date_str:
+            continue
+        try:
+            import pytz
+            et   = pytz.timezone("America/New_York")
+            dt   = datetime.fromisoformat(f"{date_str}T{time_str}")
+            dt   = et.localize(dt).astimezone(timezone.utc)
+            if most_recent is None or dt > most_recent:
+                most_recent = dt
+        except Exception:
+            continue
+    if most_recent is None:
+        return float("inf")
+    return (now - most_recent).total_seconds() / 60
+
 
 def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[list[dict], float]:
     """Fetch oil prices via yfinance.
@@ -386,6 +452,75 @@ async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
             await trigger_auto_forecast(context, top)
 
 
+async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
+    """Check CL=F 5-min volume for unusual spikes with no recent Trump post.
+
+    Fires an alert if:
+    1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER × hourly baseline
+    2. No Trump post in the last VOLUME_POST_LOCKOUT_MIN minutes
+    3. Cooldown since last volume alert has passed
+    """
+    import pandas as pd
+
+    try:
+        baseline = _get_volume_baseline()
+        ticker   = yf.Ticker("CL=F")
+        hist5m   = ticker.history(period="1d", interval="5m")[["Close", "Volume"]]
+        if hist5m.empty:
+            return
+
+        hist5m.index = pd.to_datetime(hist5m.index)
+        latest       = hist5m.iloc[-1]
+        current_vol  = float(latest["Volume"])
+        current_px   = float(latest["Close"])
+        hour         = latest.name.hour
+        avg_vol      = baseline.get(hour, baseline.get(hour - 1) or 500)
+
+        if avg_vol <= 0:
+            return
+
+        ratio = current_vol / avg_vol
+        if ratio < VOLUME_SPIKE_MULTIPLIER:
+            return
+
+        # Check cooldown
+        last_alert = context.bot_data.get("last_volume_alert")
+        now        = datetime.now(timezone.utc)
+        if last_alert and (now - last_alert).total_seconds() < VOLUME_COOLDOWN_MIN * 60:
+            return
+
+        # Check Trump post lockout — ignore spike if post came recently
+        post_age_min = _last_trump_post_age_minutes()
+        if post_age_min < VOLUME_POST_LOCKOUT_MIN:
+            log.info("Volume spike %.1fx but Trump posted %.0f min ago — suppressed", ratio, post_age_min)
+            return
+
+        context.bot_data["last_volume_alert"] = now
+        notional_m = (current_vol * current_px * 1000) / 1_000_000
+
+        log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional",
+                 ratio, current_vol, avg_vol, notional_m)
+
+        msg = (
+            f"⚠️ *Unusual Oil Volume Spike*\n\n"
+            f"CL=F 5-min volume: `{current_vol:,.0f}` contracts\n"
+            f"Baseline (hour avg): `{avg_vol:,.0f}` contracts\n"
+            f"Spike: `{ratio:.1f}x` baseline\n"
+            f"Notional: `~${notional_m:.0f}M`\n"
+            f"Price: `${current_px:.2f}`\n\n"
+            f"⏱ No Trump post in last {VOLUME_POST_LOCKOUT_MIN} min\n"
+            f"_Watch for a post — Mar 23 pattern: spike → post → -7% in 15 min_"
+        )
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            except Exception:
+                log.exception("Failed to send volume alert to %s", uid)
+
+    except Exception:
+        log.exception("Volume spike check failed")
+
+
 async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
     alerts = context.bot_data.get("alerts", [])
     if not alerts:
@@ -559,6 +694,7 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
 
     ptb_app.job_queue.run_repeating(check_price_alerts, interval=300,    first=15)
+    ptb_app.job_queue.run_repeating(check_volume_spike, interval=300,    first=30)
     ptb_app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
     ptb_app.job_queue.run_repeating(check_trump_posts,  interval=60,     first=60)
 
