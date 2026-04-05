@@ -1,13 +1,16 @@
 """
-Migas Oil Bot — Telegram interface for Migas-1.5 WTI forecasting.
+Migas Oil Bot — Telegram interface for Migas-1.5 oil price forecasting.
 
 Commands:
     /start          — welcome message
-    /forecast       — fetch real WTI prices, run Migas-1.5, return 16-day forecast
+    /forecast       — WTI 16-day forecast (60 days history)
+    /brent          — Brent 16-day forecast (60 days history)
     /alert <price>  — notify when WTI crosses a price level
     /alerts         — list active alerts
     /cancelalert    — cancel all alerts
 
+History window: 60 days — post-war regime only, pre-war data excluded.
+Brent is more sensitive to Hormuz/OPEC/Iran; WTI to US domestic policy.
 Private: only ALLOWED_USER_IDS can interact with the bot.
 """
 
@@ -58,14 +61,27 @@ def restricted(func):
 # Price + forecast helpers
 # ---------------------------------------------------------------------------
 
-def fetch_wtf_prices(days: int = 90) -> tuple[list[dict], float]:
-    """Fetch WTI crude oil prices via yfinance.
+HISTORY_DAYS = 60   # post-war regime only — pre-war dynamics are a different market
+
+TICKERS = {
+    "wti":   ("CL=F",  "WTI"),
+    "brent": ("BZ=F",  "Brent"),
+}
+
+
+def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[list[dict], float]:
+    """Fetch oil prices via yfinance.
+
+    Args:
+        instrument: "wti" or "brent"
+        days: history window in days (default 60 — post-war regime)
 
     Returns:
         price_data: list of {t, y_t} dicts sorted by date
         current_price: latest closing price
     """
-    ticker = yf.Ticker("CL=F")
+    ticker_sym, _ = TICKERS[instrument]
+    ticker = yf.Ticker(ticker_sym)
     hist = ticker.history(period=f"{days}d")[["Close"]].reset_index()
     hist = hist.dropna(subset=["Close"])
 
@@ -94,31 +110,41 @@ def get_forecast(price_data: list[dict], summary: str, pred_len: int = 16) -> li
     return data["output"]["forecast"]
 
 
-def build_summary(current_price: float) -> str:
-    """Build a basic summary for Migas. Will be replaced by live news later."""
+def build_summary(current_price: float, instrument: str = "wti") -> str:
+    """Build a basic summary for Migas. Will be replaced by live news aggregation later."""
+    label = "WTI" if instrument == "wti" else "Brent"
+    sensitivity = (
+        "sensitive to US domestic production and SPR policy"
+        if instrument == "wti"
+        else "highly sensitive to OPEC+ decisions, Iran supply risk, and Strait of Hormuz disruptions"
+    )
     return (
         f"FACTUAL SUMMARY:\n"
-        f"WTI crude oil is currently trading at ${current_price:.2f}/barrel. "
-        f"Markets are monitoring OPEC+ production decisions, US inventory data, "
-        f"and geopolitical developments in the Middle East including Iran and "
-        f"the Strait of Hormuz.\n\n"
+        f"{label} crude oil is currently trading at ${current_price:.2f}/barrel. "
+        f"This benchmark is {sensitivity}. "
+        f"Markets are in a geopolitically-driven regime following the Middle East conflict. "
+        f"OPEC+ production policy, Iran sanctions, and Strait of Hormuz risk are primary drivers.\n\n"
         f"PREDICTIVE SIGNALS:\n"
-        f"No major supply disruptions confirmed. Demand outlook remains cautious "
-        f"amid global macro uncertainty."
+        f"Ongoing conflict in the Middle East maintains a geopolitical risk premium. "
+        f"Any Strait of Hormuz disruption would be strongly bullish. "
+        f"Ceasefire or de-escalation signals would be bearish. "
+        f"Monitor Trump energy policy statements and OPEC+ emergency meetings."
     )
 
 
-def format_forecast(forecast: list[float], current_price: float) -> str:
+def format_forecast(forecast: list[float], current_price: float, instrument: str = "wti") -> str:
     """Format forecast list into a readable Telegram message."""
+    label     = "WTI" if instrument == "wti" else "Brent"
     direction = "📈" if forecast[-1] > current_price else "📉"
     change    = forecast[-1] - current_price
     pct       = (change / current_price) * 100
+    pred_len  = len(forecast)
 
     lines = [
-        f"🛢️ *WTI 16-Day Forecast* {direction}",
+        f"🛢️ *{label} {pred_len}-Day Forecast* {direction}",
         f"",
-        f"Current:  `${current_price:.2f}`",
-        f"Day 16:   `${forecast[-1]:.2f}` ({pct:+.1f}%)",
+        f"Current:     `${current_price:.2f}`",
+        f"Day {pred_len}:      `${forecast[-1]:.2f}` ({pct:+.1f}%)",
         f"",
         f"{'Day':<5} {'Price':>8}",
         f"{'---':<5} {'-----':>8}",
@@ -127,7 +153,7 @@ def format_forecast(forecast: list[float], current_price: float) -> str:
         arrow = "↑" if price > current_price else "↓"
         lines.append(f"`{i:<4}  ${price:>7.2f}  {arrow}`")
 
-    lines += ["", "_Powered by Migas-1.5_"]
+    lines += ["", "_Powered by Migas-1.5 · 60-day post-war window_"]
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
@@ -140,27 +166,38 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛢️ *Migas Oil Bot*\n\n"
         "Commands:\n"
         "/forecast — 16-day WTI forecast\n"
+        "/brent — 16-day Brent forecast\n"
         "/alert 85.00 — alert when WTI hits $85\n"
         "/alerts — list active alerts\n"
-        "/cancelalert — cancel all alerts",
+        "/cancelalert — cancel all alerts\n\n"
+        "_60-day post-war history window_",
         parse_mode="Markdown",
     )
 
 
-@restricted
-async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Fetching WTI prices and running forecast…")
-
+async def run_forecast(instrument: str, update: Update):
+    """Shared forecast logic for WTI and Brent."""
+    label = "WTI" if instrument == "wti" else "Brent"
+    msg = await update.message.reply_text(f"⏳ Fetching {label} prices and running forecast…")
     try:
-        price_data, current_price = fetch_wtf_prices()
-        summary  = build_summary(current_price)
+        price_data, current_price = fetch_prices(instrument)
+        summary  = build_summary(current_price, instrument)
         forecast = get_forecast(price_data, summary)
-        text     = format_forecast(forecast, current_price)
+        text     = format_forecast(forecast, current_price, instrument)
         await msg.edit_text(text, parse_mode="Markdown")
-
     except Exception as exc:
         log.exception("Forecast error")
         await msg.edit_text(f"❌ Error: {exc}")
+
+
+@restricted
+async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_forecast("wti", update)
+
+
+@restricted
+async def cmd_brent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_forecast("brent", update)
 
 
 @restricted
@@ -261,6 +298,7 @@ def main():
 
     app.add_handler(CommandHandler("start",        cmd_start))
     app.add_handler(CommandHandler("forecast",     cmd_forecast))
+    app.add_handler(CommandHandler("brent",        cmd_brent))
     app.add_handler(CommandHandler("alert",        cmd_alert))
     app.add_handler(CommandHandler("alerts",       cmd_alerts))
     app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
