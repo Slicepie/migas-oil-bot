@@ -671,15 +671,19 @@ def get_scored_posts() -> list[dict]:
     return cached
 
 
-def get_relevant_trump_posts() -> list[str]:
-    """Poll for new posts via Apify (real-time), append to cache, return new oil-relevant texts."""
+def get_relevant_trump_posts() -> list[dict]:
+    """Poll for new posts via Apify (real-time), append to cache, return new oil-relevant posts.
+
+    Returns list of scored post dicts: {text, score, signals, uso_pct_5m, confirmed, ...}
+    Sorted by |score| descending so the caller can act on the strongest signal first.
+    """
     existing_texts = {p["text"] for p in _read_cache()}
     new_raw        = fetch_posts_apify_incremental()
     if not new_raw:
         return []
     append_new_posts(new_raw)
     new_scored = _score_raw_posts(new_raw)
-    return [p["text"] for p in new_scored if p["text"] not in existing_texts]
+    return [p for p in new_scored if p["text"] not in existing_texts]
 
 
 # ---------------------------------------------------------------------------

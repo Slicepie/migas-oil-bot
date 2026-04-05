@@ -16,6 +16,7 @@ Private: only ALLOWED_USER_IDS can interact with the bot.
 
 import logging
 import os
+from datetime import datetime, timezone
 from functools import wraps
 
 import requests
@@ -23,7 +24,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from news import build_live_summary, get_relevant_trump_posts, refresh_cache
+from news import build_live_summary, get_relevant_trump_posts, refresh_cache, score_emoji
 
 load_dotenv()
 
@@ -36,6 +37,10 @@ RUNPOD_API_KEY   = os.environ["RUNPOD_API_KEY"]
 RUNPOD_ENDPOINT  = "https://api.runpod.ai/v2/fxkby0bka43s1i/runsync"
 
 ALLOWED_USER_IDS = {1038492789}   # @slicepie5
+
+AUTO_FORECAST_MIN_SCORE      = 3    # |score| threshold to trigger auto-forecast
+AUTO_FORECAST_COOLDOWN_MIN   = 30   # minutes between auto-forecasts (avoid spam)
+AUTO_FORECAST_PRED_LEN       = 5    # days — shorter forecasts are more accurate for events
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -277,19 +282,78 @@ async def refresh_post_cache(context: ContextTypes.DEFAULT_TYPE):
         log.exception("Cache refresh failed")
 
 
-async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
-    """Poll Truth Social for new posts (incremental) and alert if oil-relevant."""
-    posts = get_relevant_trump_posts()
-    if not posts:
-        return
+async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
+    """Run a short WTI forecast triggered by a high-scoring Trump post."""
+    sc       = post["score"]
+    signals  = ", ".join(post["signals"])
+    text     = post["text"]
+    emoji    = score_emoji(sc)
+    strength = "strongly" if abs(sc) >= 4 else "moderately"
+    dirn     = "bullish 📈" if sc > 0 else "bearish 📉"
 
     for uid in ALLOWED_USER_IDS:
         try:
-            text = f"🚨 *Trump posted about oil/energy*\n\n"
-            text += "\n\n".join(f"_{p[:400]}_" for p in posts[:3])
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+            msg = await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"⚡ *Auto-forecast triggered* {emoji} `{sc:+d}`\n\n"
+                    f"_{text[:300]}_\n\n"
+                    f"*{strength} {dirn}* — {signals}\n\n"
+                    f"⏳ Running {AUTO_FORECAST_PRED_LEN}-day WTI forecast…"
+                ),
+                parse_mode="Markdown",
+            )
+
+            try:
+                price_data, current_price = fetch_prices("wti")
+                summary, sources          = build_live_summary(current_price, "wti")
+                forecast                  = get_forecast(price_data, summary, pred_len=AUTO_FORECAST_PRED_LEN)
+                net_label                 = sources.get("net_label", "")
+                result                    = (
+                    f"⚡ *Auto-forecast* {emoji} `{sc:+d}`\n\n"
+                    f"_{text[:200]}_\n\n"
+                    f"*{strength} {dirn}* — {signals}\n\n"
+                ) + format_forecast(forecast, current_price, "wti") + f"\n\n📰 {net_label}"
+                await msg.edit_text(result, parse_mode="Markdown")
+
+            except Exception as exc:
+                log.exception("Auto-forecast RunPod call failed")
+                await msg.edit_text(
+                    f"⚡ *{strength} {dirn} signal* {emoji} `{sc:+d}`\n\n"
+                    f"_{text[:300]}_\n\n_{signals}_\n\n❌ Forecast failed: {exc}",
+                    parse_mode="Markdown",
+                )
+        except Exception:
+            log.exception("Failed to send auto-forecast to %s", uid)
+
+
+async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
+    """Poll Truth Social for new posts (incremental) and alert if oil-relevant."""
+    posts = get_relevant_trump_posts()   # list[dict] sorted by |score|
+    if not posts:
+        return
+
+    # Alert about all new oil-relevant posts
+    for uid in ALLOWED_USER_IDS:
+        try:
+            lines = ["🚨 *Trump posted about oil/energy*\n"]
+            for p in posts[:3]:
+                lines.append(f"{score_emoji(p['score'])} `{p['score']:+d}` _{p['text'][:300]}_")
+            await context.bot.send_message(
+                chat_id=uid, text="\n\n".join(lines), parse_mode="Markdown"
+            )
         except Exception:
             log.exception("Failed to send Trump alert to %s", uid)
+
+    # Auto-forecast if the strongest new post clears the threshold and cooldown has passed
+    top = max(posts, key=lambda p: abs(p["score"]))
+    if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
+        last = context.bot_data.get("last_auto_forecast")
+        now  = datetime.now(timezone.utc)
+        if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
+            context.bot_data["last_auto_forecast"] = now
+            log.info("Auto-forecast triggered by post (score %+d): %s", top["score"], top["text"][:80])
+            await trigger_auto_forecast(context, top)
 
 
 async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
