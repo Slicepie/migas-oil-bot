@@ -176,21 +176,50 @@ def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[lis
     return price_data, current_price
 
 
-def get_forecast(price_data: list[dict], summary: str, pred_len: int = 16) -> list[float]:
-    """Call the RunPod Migas-1.5 endpoint and return the forecast array."""
+def get_forecast(
+    price_data:  list[dict],
+    summary:     str,
+    pred_len:    int  = 16,
+    n_summaries: int  = 5,
+    counterfactual: bool = False,
+    bullish_predictive: str = "",
+    bearish_predictive: str = "",
+) -> dict:
+    """Call the RunPod Migas-1.5 endpoint.
+
+    Returns a dict with keys:
+      - forecast          — main ensemble forecast (always present)
+      - chronos_baseline  — text-free baseline (always present)
+      - forecast_bullish  — bullish counterfactual (if counterfactual=True)
+      - forecast_bearish  — bearish counterfactual (if counterfactual=True)
+    """
+    payload: dict = {
+        "price_data":  price_data,
+        "summary":     summary,
+        "pred_len":    pred_len,
+        "n_summaries": n_summaries,
+    }
+    if counterfactual:
+        payload["counterfactual"] = True
+        if bullish_predictive:
+            payload["bullish_predictive"] = bullish_predictive
+        if bearish_predictive:
+            payload["bearish_predictive"] = bearish_predictive
+
     resp = requests.post(
         RUNPOD_ENDPOINT,
         headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-        json={"input": {"price_data": price_data, "summary": summary, "pred_len": pred_len}},
+        json={"input": payload},
         timeout=180,
     )
     resp.raise_for_status()
     data = resp.json()
 
-    if "error" in data.get("output", {}):
-        raise RuntimeError(data["output"]["error"])
+    output = data.get("output", {})
+    if "error" in output:
+        raise RuntimeError(output["error"])
 
-    return data["output"]["forecast"]
+    return output
 
 
 def build_summary(current_price: float, instrument: str = "wti") -> str:
@@ -268,7 +297,6 @@ async def run_forecast(instrument: str, update: Update):
         price_data, current_price = fetch_prices(instrument)
         summary, sources = build_live_summary(current_price, instrument)
 
-        # Show what news was found
         confirmed   = sources.get("confirmed", 0)
         unconfirmed = sources.get("unconfirmed", 0)
         avg_move    = sources.get("avg_move", 0.0)
@@ -278,9 +306,10 @@ async def run_forecast(instrument: str, update: Update):
             f"{unconfirmed} unconfirmed signals\n"
             f"Signal: {net_label}"
         )
-        await msg.edit_text(f"⏳ Running Migas-1.5 forecast…\n{news_line}")
+        await msg.edit_text(f"⏳ Running Migas-1.5 forecast (ensemble)…\n{news_line}")
 
-        forecast = get_forecast(price_data, summary)
+        output   = get_forecast(price_data, summary, n_summaries=5)
+        forecast = output["forecast"]
         text     = format_forecast(forecast, current_price, instrument)
         text    += f"\n\n📰 {net_label}"
         await msg.edit_text(text, parse_mode="Markdown")
@@ -482,35 +511,45 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
 
             try:
                 price_data, current_price = fetch_prices("wti")
+                summary, sources          = build_live_summary(current_price, "wti")
+                net_label                 = sources.get("net_label", "")
 
-                # --- Forecast A: standard summary ---
-                summary_a, sources_a = build_live_summary(current_price, "wti")
-                forecast_a           = get_forecast(price_data, summary_a, pred_len=AUTO_FORECAST_PRED_LEN)
-                net_label_a          = sources_a.get("net_label", "")
-                result_a             = (
-                    f"⚡ *Forecast A — Standard* {emoji} `{sc:+d}`\n"
-                    f"_60-day average net label_\n\n"
-                    f"_{text[:150]}_\n\n"
-                ) + format_forecast(forecast_a, current_price, "wti") + f"\n\n📰 {net_label_a}"
+                # For extreme posts run counterfactual (bullish + bearish scenarios)
+                output = get_forecast(
+                    price_data, summary,
+                    pred_len       = AUTO_FORECAST_PRED_LEN,
+                    n_summaries    = 5,
+                    counterfactual = ab_test,
+                )
 
-                if ab_test:
-                    # --- Forecast B: current post overrides net label ---
-                    summary_b, sources_b = build_live_summary_override(current_price, post, "wti")
-                    forecast_b           = get_forecast(price_data, summary_b, pred_len=AUTO_FORECAST_PRED_LEN)
-                    net_label_b          = sources_b.get("net_label", "")
-                    result_b             = (
-                        f"⚡ *Forecast B — Regime Override* {emoji} `{sc:+d}`\n"
-                        f"_Current post overrides 60-day trend_\n\n"
-                        f"_{text[:150]}_\n\n"
-                    ) + format_forecast(forecast_b, current_price, "wti") + f"\n\n📰 {net_label_b}"
+                forecast = output["forecast"]
+                result   = (
+                    f"⚡ *Auto-forecast* {emoji} `{sc:+d}`\n\n"
+                    f"_{text[:200]}_\n\n"
+                    f"*{strength} {dirn}* — {signals}\n\n"
+                ) + format_forecast(forecast, current_price, "wti") + f"\n\n📰 {net_label}"
+                await msg.edit_text(result, parse_mode="Markdown")
 
-                    await msg.edit_text(result_a, parse_mode="Markdown")
-                    await context.bot.send_message(
-                        chat_id=uid, text=result_b, parse_mode="Markdown"
+                # Send counterfactual scenarios as a second message
+                if ab_test and "forecast_bullish" in output:
+                    fc_bull = output["forecast_bullish"]
+                    fc_bear = output["forecast_bearish"]
+                    end_bull = fc_bull[-1]
+                    end_bear = fc_bear[-1]
+                    pct_bull = (end_bull - current_price) / current_price * 100
+                    pct_bear = (end_bear - current_price) / current_price * 100
+                    cf_text  = (
+                        f"🔀 *Counterfactual Scenarios* (same price data, different narrative)\n\n"
+                        f"🟢 *Escalation scenario:* Day {AUTO_FORECAST_PRED_LEN} → "
+                        f"`${end_bull:.2f}` ({pct_bull:+.1f}%)\n"
+                        f"🔴 *De-escalation scenario:* Day {AUTO_FORECAST_PRED_LEN} → "
+                        f"`${end_bear:.2f}` ({pct_bear:+.1f}%)\n\n"
+                        f"_Range: ${end_bear:.2f} – ${end_bull:.2f} · "
+                        f"spread {abs(pct_bull - pct_bear):.1f}%_"
                     )
-                else:
-                    result_a = result_a.replace("*Forecast A — Standard*", "*Auto-forecast*")
-                    await msg.edit_text(result_a, parse_mode="Markdown")
+                    await context.bot.send_message(
+                        chat_id=uid, text=cf_text, parse_mode="Markdown"
+                    )
 
             except Exception as exc:
                 log.exception("Auto-forecast RunPod call failed")
@@ -550,6 +589,59 @@ async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
             context.bot_data["last_auto_forecast"] = now
             log.info("Auto-forecast triggered by post (score %+d): %s", top["score"], top["text"][:80])
             await trigger_auto_forecast(context, top)
+
+
+async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
+    """Send daily 8:30am ET briefing: WTI forecast + strongest recent signal."""
+    log.info("Running daily morning briefing…")
+    for uid in ALLOWED_USER_IDS:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=uid,
+                text="🌅 *Daily Oil Briefing — 8:30am ET*\n\n⏳ Fetching forecast and signals…",
+                parse_mode="Markdown",
+            )
+            try:
+                # --- Signal ---
+                posts  = get_scored_posts()
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).date().isoformat()
+                recent = [p for p in posts if p.get("date", "") >= cutoff]
+
+                # --- Forecast ---
+                price_data, current_price = fetch_prices("wti")
+                summary, sources          = build_live_summary(current_price, "wti")
+                output                    = get_forecast(price_data, summary, pred_len=AUTO_FORECAST_PRED_LEN, n_summaries=5)
+                forecast                  = output["forecast"]
+                net_label                 = sources.get("net_label", "")
+                forecast_text             = format_forecast(forecast, current_price, "wti")
+
+                # --- Combine ---
+                if recent:
+                    top          = max(recent, key=lambda p: abs(p.get("score", 0)))
+                    signal_text  = format_analogue_signal(top, current_price)
+                    full_text    = (
+                        f"🌅 *Daily Oil Briefing — 8:30am ET*\n\n"
+                        f"*WTI Forecast:*\n{forecast_text}\n\n"
+                        f"📰 {net_label}\n\n"
+                        f"─────────────────\n\n"
+                        f"*Latest Signal:*\n{signal_text}"
+                    )
+                else:
+                    full_text = (
+                        f"🌅 *Daily Oil Briefing — 8:30am ET*\n\n"
+                        f"*WTI Forecast:*\n{forecast_text}\n\n"
+                        f"📰 {net_label}\n\n"
+                        f"⚪ No oil-relevant Trump posts in last 48h."
+                    )
+
+                await msg.edit_text(full_text, parse_mode="Markdown")
+
+            except Exception as exc:
+                log.exception("Daily briefing forecast failed")
+                await msg.edit_text(f"🌅 *Daily Briefing*\n\n❌ Forecast failed: {exc}", parse_mode="Markdown")
+
+        except Exception:
+            log.exception("Daily briefing failed for %s", uid)
 
 
 async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
@@ -809,6 +901,13 @@ async def main_async():
     ptb_app.job_queue.run_repeating(check_volume_spike, interval=300,    first=30)
     ptb_app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
     ptb_app.job_queue.run_repeating(check_trump_posts,  interval=60,     first=60)
+
+    # Daily morning briefing — 8:30am ET = 12:30 UTC
+    import pytz
+    et = pytz.timezone("America/New_York")
+    ptb_app.job_queue.run_daily(daily_morning_briefing, time=datetime.now(et).replace(
+        hour=8, minute=30, second=0, microsecond=0
+    ).timetz())
 
     # Build aiohttp webhook server
     post_queue = asyncio.Queue()
