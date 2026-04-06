@@ -17,7 +17,7 @@ Private: only ALLOWED_USER_IDS can interact with the bot.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import requests
@@ -338,17 +338,45 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show trader signal for the strongest recent Trump post."""
+    """Show trader signal for the strongest Trump post in the last 48h.
+    Shows a staleness warning if the post is older than 4 hours.
+    Returns 'no recent signal' if nothing in last 48h.
+    """
     msg = await update.message.reply_text("⏳ Calculating signal…")
     try:
         _, current_price = fetch_prices("wti")
         posts    = get_scored_posts()
-        # Pick the highest |score| post from the last 24h, else strongest overall
-        from datetime import date as _date
-        today    = _date.today().isoformat()
-        recent   = [p for p in posts if p.get("date", "") >= today]
-        top      = max(recent or posts, key=lambda p: abs(p.get("score", 0)))
+
+        # Only look at posts from the last 48 hours
+        cutoff   = (datetime.now(timezone.utc) - timedelta(hours=48)).date().isoformat()
+        recent   = [p for p in posts if p.get("date", "") >= cutoff]
+
+        if not recent:
+            await msg.edit_text(
+                "⚪ *No recent signal*\n\n"
+                "No oil-relevant Trump posts in the last 48 hours.\n"
+                "_Monitoring continues — you'll be alerted when a new post is detected._",
+                parse_mode="Markdown",
+            )
+            return
+
+        top      = max(recent, key=lambda p: abs(p.get("score", 0)))
         text     = format_analogue_signal(top, current_price)
+
+        # Add staleness warning if post is older than 4 hours
+        post_date = top.get("date", "")
+        post_time = top.get("time_et", "") or "00:00:00"
+        try:
+            import pytz
+            et  = pytz.timezone("America/New_York")
+            dt  = datetime.fromisoformat(f"{post_date}T{post_time}")
+            dt  = et.localize(dt).astimezone(timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+            if age > 4:
+                text = f"⚠️ _Signal is {age:.0f}h old — market may have already reacted_\n\n" + text
+        except Exception:
+            pass
+
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as exc:
         log.exception("Signal command error")
