@@ -43,6 +43,10 @@ BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
 RUNPOD_API_KEY   = os.environ["RUNPOD_API_KEY"]
 RUNPOD_ENDPOINT  = "https://api.runpod.ai/v2/fxkby0bka43s1i/runsync"
 
+# USOIL.AI dashboard — save forecasts for tracking vs reality
+USOIL_AI_URL     = os.environ.get("USOIL_AI_URL", "")          # e.g. https://usoil-ai.vercel.app
+FORECAST_SECRET  = os.environ.get("FORECAST_SAVE_SECRET", "changeme")
+
 ALLOWED_USER_IDS = {1038492789}   # @slicepie5
 
 AUTO_FORECAST_MIN_SCORE      = 3    # |score| threshold to trigger auto-forecast
@@ -222,6 +226,51 @@ def get_forecast(
     return output
 
 
+def save_forecast_to_dashboard(
+    instrument:    str,
+    current_price: float,
+    output:        dict,
+    summary:       str,
+    score:         int   = 0,
+    direction:     str   = "NEUTRAL",
+    trigger_post:  str   = "",
+    signals:       list  | None = None,
+    pred_len:      int   = 16,
+) -> None:
+    """POST forecast to USOIL.AI dashboard for tracking vs reality.
+    Silently ignores errors so it never breaks the bot."""
+    if not USOIL_AI_URL:
+        return
+    try:
+        payload = {
+            "secret":           FORECAST_SECRET,
+            "instrument":       instrument,
+            "generated_at":     datetime.now(timezone.utc).isoformat(),
+            "current_price":    current_price,
+            "pred_len":         pred_len,
+            "forecast":         output.get("forecast", []),
+            "chronos_baseline": output.get("chronos_baseline", []),
+            "forecast_bullish": output.get("forecast_bullish"),
+            "forecast_bearish": output.get("forecast_bearish"),
+            "summary":          summary,
+            "score":            score,
+            "direction":        direction,
+            "trigger_post":     trigger_post,
+            "signals":          signals or [],
+        }
+        resp = requests.post(
+            f"{USOIL_AI_URL}/api/forecast/save",
+            json=payload,
+            timeout=10,
+        )
+        if resp.ok:
+            log.info("Forecast saved to dashboard: %s", resp.json().get("id"))
+        else:
+            log.warning("Dashboard save failed: %s", resp.status_code)
+    except Exception as exc:
+        log.warning("Dashboard save error (non-fatal): %s", exc)
+
+
 def build_summary(current_price: float, instrument: str = "wti") -> str:
     """Build a basic summary for Migas. Will be replaced by live news aggregation later."""
     label = "WTI" if instrument == "wti" else "Brent"
@@ -313,6 +362,17 @@ async def run_forecast(instrument: str, update: Update):
         text     = format_forecast(forecast, current_price, instrument)
         text    += f"\n\n📰 {net_label}"
         await msg.edit_text(text, parse_mode="Markdown")
+
+        # Save to USOIL.AI dashboard for vs-reality tracking
+        save_forecast_to_dashboard(
+            instrument=instrument,
+            current_price=current_price,
+            output=output,
+            summary=summary,
+            score=0,
+            direction="NEUTRAL",
+            pred_len=16,
+        )
     except Exception as exc:
         log.exception("Forecast error")
         await msg.edit_text(f"❌ Error: {exc}")
@@ -529,6 +589,19 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
                     f"*{strength} {dirn}* — {signals}\n\n"
                 ) + format_forecast(forecast, current_price, "wti") + f"\n\n📰 {net_label}"
                 await msg.edit_text(result, parse_mode="Markdown")
+
+                # Save to USOIL.AI dashboard for vs-reality tracking
+                save_forecast_to_dashboard(
+                    instrument    = "wti",
+                    current_price = current_price,
+                    output        = output,
+                    summary       = summary,
+                    score         = sc,
+                    direction     = "BULLISH" if sc > 0 else "BEARISH",
+                    trigger_post  = text[:500],
+                    signals       = list(post.get("signals", {}).keys()),
+                    pred_len      = AUTO_FORECAST_PRED_LEN,
+                )
 
                 # Send counterfactual scenarios as a second message
                 if ab_test and "forecast_bullish" in output:
