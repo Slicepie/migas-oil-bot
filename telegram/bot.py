@@ -801,8 +801,11 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
 
 
 async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
-    """Poll Truth Social for new posts (incremental) and alert if oil-relevant."""
-    posts = get_relevant_trump_posts()   # list[dict] sorted by |score|
+    """Check cache for any unalerted oil-relevant posts (no Apify call — webhook handles ingestion)."""
+    # We no longer call Apify here — that caused 60 runs/hour and rate-limiting.
+    # New posts arrive via the Apify webhook → process_webhook_posts.
+    # This job only exists now to catch anything that slipped through the cache.
+    posts = []   # no-op until we implement cache-diff alerting
     if not posts:
         return
 
@@ -1198,7 +1201,7 @@ async def main_async():
     ptb_app.job_queue.run_repeating(check_price_alerts, interval=300,    first=15)
     ptb_app.job_queue.run_repeating(check_volume_spike, interval=300,    first=30)
     ptb_app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
-    ptb_app.job_queue.run_repeating(check_trump_posts,  interval=60,     first=60)
+    ptb_app.job_queue.run_repeating(check_trump_posts,  interval=600,    first=60)
 
     # Daily morning briefing — 8:30am ET = 12:30 UTC
     import pytz
