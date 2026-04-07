@@ -739,6 +739,17 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
                 summary, sources          = build_live_summary(current_price, "wti")
                 net_label                 = sources.get("net_label", "")
 
+                # Inject LLM signal so Migas sees the correct sentiment context
+                llm_reason    = post.get("llm_reason", "")
+                llm_direction = post.get("direction", "NEUTRAL")
+                llm_confidence = post.get("llm_confidence", "")
+                if llm_reason:
+                    summary += (
+                        f"\n\nACTIVE SIGNAL ({llm_direction}, score {sc:+d}, {llm_confidence} confidence): "
+                        f"{llm_reason} "
+                        f"Key signals: {', '.join(post.get('llm_signals', []))}"
+                    )
+
                 # For extreme posts run counterfactual (bullish + bearish scenarios)
                 output = get_forecast(
                     price_data, summary,
@@ -1139,8 +1150,6 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
     log.info("Webhook: firing alerts for %d new posts", len(new_posts))
 
-    # Reuse the same alert + auto-forecast logic as the polling job
-    # Inject into the PTB context via a fake job context
     class _FakeContext:
         def __init__(self):
             self.bot       = ptb_app.bot
@@ -1149,72 +1158,76 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
     ctx = _FakeContext()
 
-    # ── Step 1: Immediate alert — raw post + keyword score ───────────────────
-    for uid in ALLOWED_USER_IDS:
-        try:
-            for p in new_posts[:3]:
-                kw_score = p["score"]
-                dir_arrow = "▲" if kw_score > 0 else ("▼" if kw_score < 0 else "—")
-                direction = "BULL" if kw_score > 0 else ("BEAR" if kw_score < 0 else "FLAT")
-                text = (
-                    f"⚡ *Trump posted*\n\n"
-                    f"_{p['text'][:400]}_\n\n"
-                    f"{score_emoji(kw_score)} Keyword: `{kw_score:+d}` {dir_arrow} {direction}\n"
-                    f"_LLM analysis incoming…_"
-                )
-                await ptb_app.bot.send_message(
-                    chat_id=uid, text=text, parse_mode="Markdown"
-                )
-        except Exception:
-            log.exception("Webhook immediate alert send failed")
-
-    # ── Step 2: LLM follow-up after 2s ───────────────────────────────────────
+    # ── Score all posts with LLM + fetch price in parallel ───────────────────
     import asyncio as _asyncio
-    await _asyncio.sleep(2)
 
-    price_now = _current_wti()
-    if price_now is None:
-        try:
-            _, price_now = fetch_prices("wti")
-        except Exception:
-            pass
+    async def _score_and_price(p: dict):
+        llm, price = await _asyncio.gather(
+            llm_score_post(p["text"]),
+            _asyncio.get_event_loop().run_in_executor(None, _current_wti),
+        )
+        return llm, price
 
-    for uid in ALLOWED_USER_IDS:
-        for p in new_posts[:3]:
+    for p in new_posts[:3]:
+        llm, price_now = await _score_and_price(p)
+
+        # Fallback price
+        if price_now is None:
             try:
-                llm = await llm_score_post(p["text"])
-                if llm:
-                    followup_text = format_llm_followup(
-                        post_text = p["text"],
-                        kw_score  = p["score"],
-                        llm       = llm,
-                        price     = price_now,
-                    )
-                    await ptb_app.bot.send_message(
-                        chat_id=uid, text=followup_text, parse_mode="Markdown"
-                    )
-                    # Override score/direction with LLM result for downstream use
-                    p["score"]     = llm.get("score", p["score"])
-                    p["direction"] = llm.get("direction", p.get("direction", "NEUTRAL"))
-                    p["llm_reason"] = llm.get("reason", "")
+                _, price_now = fetch_prices("wti")
             except Exception:
-                log.exception("LLM follow-up failed for uid %s", uid)
+                pass
 
-    # Save all new signals to USOIL.AI dashboard
-    # price_now already fetched above for LLM step; fallback if still None
-    if price_now is None:
-        log.warning("Could not fetch price_at_alert — outcomes will not be scored")
+        kw_score = p["score"]
 
-    for p in new_posts:
-        sc       = p.get("score", 0)
+        # LLM is the signal — override keyword score
+        if llm:
+            p["score"]      = llm["score"]
+            p["direction"]  = llm["direction"]
+            p["llm_reason"] = llm.get("reason", "")
+            p["llm_confidence"] = llm.get("confidence", "")
+            p["llm_signals"]    = llm.get("key_signals", [])
+
+        sc        = p["score"]
+        direction = p.get("direction", "NEUTRAL")
+        reason    = p.get("llm_reason", "")
+        confidence = p.get("llm_confidence", "")
+        key_sigs  = p.get("llm_signals", [])
+
+        dir_arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "—")
+        dir_label = "BULL" if sc > 0 else ("BEAR" if sc < 0 else "FLAT")
+        conf_flag = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(confidence, "")
+        kw_line   = f"\n_Keyword score: `{kw_score:+d}`_" if kw_score != sc else ""
+        sigs_line = f"\n🏷 {' · '.join(f'`{s}`' for s in key_sigs[:4])}" if key_sigs else ""
+        price_line = f"\n💵 WTI: `${price_now:.2f}`" if price_now else ""
+
+        alert_text = (
+            f"⚡ *Trump posted*\n\n"
+            f"_{p['text'][:400]}_\n\n"
+            f"{score_emoji(sc)} *{sc:+d} {dir_arrow} {dir_label}* {conf_flag}"
+            f"{kw_line}"
+            f"{price_line}"
+            f"{sigs_line}"
+            + (f"\n\n_{reason}_" if reason else "")
+        )
+
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await ptb_app.bot.send_message(
+                    chat_id=uid, text=alert_text, parse_mode="Markdown"
+                )
+            except Exception:
+                log.exception("Webhook alert send failed for uid %s", uid)
+
+        # Save to dashboard
         sig_id   = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}"
-        sig_list = list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", []))
+        sig_list = key_sigs or (list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", [])))
         analogue = analogue_signal(p) if abs(sc) >= 2 else {}
         save_signal_to_dashboard(
             signal_id      = sig_id,
             ts             = datetime.now(timezone.utc).isoformat(),
             score          = sc,
-            direction      = "BULLISH" if sc > 0 else ("BEARISH" if sc < 0 else "NEUTRAL"),
+            direction      = direction,
             text           = p.get("text", ""),
             signals        = sig_list,
             signal_type    = "trump_post",
@@ -1225,7 +1238,7 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             est24h         = analogue.get("est_24h"),
             hit_rate_1h    = analogue.get("hit_rate_1h"),
         )
-        # Schedule local follow-up checks at 15m / 1h / 24h
+
         if price_now and sc != 0:
             local_sig_id = log_signal(
                 signal_type    = "trump_post",
@@ -1237,7 +1250,7 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             )
             _schedule_follow_ups(ctx.job_queue, local_sig_id, price_now)
 
-    # Auto-forecast
+    # Auto-forecast — use highest-scoring post (by LLM score)
     top = max(new_posts, key=lambda p: abs(p["score"]))
     if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
         last = ptb_app.bot_data.get("last_auto_forecast")
