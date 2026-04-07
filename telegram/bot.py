@@ -271,6 +271,55 @@ def save_forecast_to_dashboard(
         log.warning("Dashboard save error (non-fatal): %s", exc)
 
 
+def save_signal_to_dashboard(
+    signal_id:      str,
+    ts:             str,
+    score:          int,
+    direction:      str,
+    text:           str,
+    signals:        list,
+    signal_type:    str   = "trump_post",
+    url:            str   = "",
+    price_at_alert: float | None = None,
+    avg15m:         float | None = None,
+    avg1h:          float | None = None,
+    est24h:         float | None = None,
+    hit_rate_1h:    float | None = None,
+) -> None:
+    """POST a signal event to USOIL.AI dashboard for the live signal feed.
+    Silently ignores errors so it never blocks the bot."""
+    if not USOIL_AI_URL:
+        return
+    try:
+        payload = {
+            "secret":         FORECAST_SECRET,
+            "id":             signal_id,
+            "ts":             ts,
+            "score":          score,
+            "direction":      direction,
+            "text":           text,
+            "signals":        signals,
+            "type":           signal_type,
+            "url":            url,
+            "price_at_alert": price_at_alert,
+            "avg15m":         avg15m,
+            "avg1h":          avg1h,
+            "est24h":         est24h,
+            "hit_rate_1h":    hit_rate_1h,
+        }
+        resp = requests.post(
+            f"{USOIL_AI_URL}/api/signals/save",
+            json=payload,
+            timeout=10,
+        )
+        if resp.ok:
+            log.info("Signal saved to dashboard: %s", resp.json().get("id"))
+        else:
+            log.warning("Dashboard signal save failed: %s %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        log.warning("Dashboard signal save error (non-fatal): %s", exc)
+
+
 def build_summary(current_price: float, instrument: str = "wti") -> str:
     """Build a basic summary for Migas. Will be replaced by live news aggregation later."""
     label = "WTI" if instrument == "wti" else "Brent"
@@ -653,6 +702,28 @@ async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("Failed to send Trump alert to %s", uid)
 
+    # Save all new signals to USOIL.AI dashboard
+    price_now = _current_wti()
+    for p in posts:
+        sc  = p.get("score", 0)
+        sig_list = list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", []))
+        analogue = analogue_signal(p) if abs(sc) >= 2 else {}
+        save_signal_to_dashboard(
+            signal_id      = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}",
+            ts             = datetime.now(timezone.utc).isoformat(),
+            score          = sc,
+            direction      = "BULLISH" if sc > 0 else ("BEARISH" if sc < 0 else "NEUTRAL"),
+            text           = p.get("text", ""),
+            signals        = sig_list,
+            signal_type    = "trump_post",
+            url            = p.get("url", ""),
+            price_at_alert = price_now,
+            avg15m         = analogue.get("avg_15m_move"),
+            avg1h          = analogue.get("avg_1h_move"),
+            est24h         = analogue.get("est_24h_move"),
+            hit_rate_1h    = analogue.get("hit_rate_1h"),
+        )
+
     # Auto-forecast if the strongest new post clears the threshold and cooldown has passed
     top = max(posts, key=lambda p: abs(p["score"]))
     if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
@@ -773,6 +844,17 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
             extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0)},
         )
         _schedule_follow_ups(context.job_queue, signal_id, current_px)
+
+        save_signal_to_dashboard(
+            signal_id      = signal_id or f"vol_{int(now.timestamp())}",
+            ts             = now.isoformat(),
+            score          = 0,
+            direction      = "NEUTRAL",
+            text           = f"Volume spike detected — {ratio:.1f}x baseline. {current_vol:,.0f} contracts (~${notional_m:.0f}M notional). No Trump post in last {VOLUME_POST_LOCKOUT_MIN} min.",
+            signals        = [],
+            signal_type    = "volume_spike",
+            price_at_alert = current_px,
+        )
 
         log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional",
                  ratio, current_vol, avg_vol, notional_m)
@@ -938,6 +1020,28 @@ async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
             )
         except Exception:
             log.exception("Webhook alert send failed")
+
+    # Save all new signals to USOIL.AI dashboard
+    price_now = _current_wti()
+    for p in new_posts:
+        sc       = p.get("score", 0)
+        sig_list = list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", []))
+        analogue = analogue_signal(p) if abs(sc) >= 2 else {}
+        save_signal_to_dashboard(
+            signal_id      = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}",
+            ts             = datetime.now(timezone.utc).isoformat(),
+            score          = sc,
+            direction      = "BULLISH" if sc > 0 else ("BEARISH" if sc < 0 else "NEUTRAL"),
+            text           = p.get("text", ""),
+            signals        = sig_list,
+            signal_type    = "trump_post",
+            url            = p.get("url", ""),
+            price_at_alert = price_now,
+            avg15m         = analogue.get("avg_15m_move"),
+            avg1h          = analogue.get("avg_1h_move"),
+            est24h         = analogue.get("est_24h_move"),
+            hit_rate_1h    = analogue.get("hit_rate_1h"),
+        )
 
     # Auto-forecast
     top = max(new_posts, key=lambda p: abs(p["score"]))
