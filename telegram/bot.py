@@ -1083,15 +1083,16 @@ async def handle_apify_webhook(request: web.Request) -> web.Response:
         log.info("Apify webhook received for run %s", run_id)
 
         # Fetch posts from this specific run's dataset
-        resp = requests.get(
-            f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",
-            params={"token": APIFY_API_TOKEN},
-            timeout=30,
-        )
+        url  = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items"
+        resp = requests.get(url, params={"token": APIFY_API_TOKEN}, timeout=30)
+        log.info("Dataset fetch: status=%s url=%s", resp.status_code, url)
         resp.raise_for_status()
         raw_posts = resp.json()
+        log.info("Dataset fetch returned %d items (first 200 chars): %s",
+                 len(raw_posts), str(raw_posts)[:200])
 
         if not raw_posts:
+            log.warning("Webhook run %s dataset is empty — nothing to process", run_id)
             return web.Response(status=200)
 
         # Put in queue for the main loop to process
