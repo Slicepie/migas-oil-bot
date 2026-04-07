@@ -400,8 +400,7 @@ SIGNALS = [
     # DRILL / SUPPLY EXPANSION (bearish)
     # -------------------------------------------------------------------------
     (["drill baby drill", "drill, baby, drill",
-      "liquid gold", "unleash energy",
-      "energy dominance", "energy independence",
+      "liquid gold", "unleash american energy",
       "drill everywhere", "open up drilling",
       "approve pipeline", "keystone approved",
       "lng exports", "lng terminals",
@@ -432,8 +431,36 @@ def score_post(text: str) -> tuple[int, list[str]]:
     Returns:
         score: integer from -5 to +5
         matched_signals: list of signal labels that matched
+
+    Returns (0, []) immediately if the post is not oil-market relevant.
     """
+    # ── Step 1: Topic relevance gate ─────────────────────────────────────────
+    # Post must be about one of these topics to be scored at all.
+    # This filters out endorsements, rally speeches, unrelated political posts.
+    OIL_TOPICS = [
+        "iran", "iranian", "tehran", "hormuz", "strait of hormuz",
+        "russia", "russian", "ukraine", "ukrainian", "moscow",
+        "opec", "saudi", "aramco", "riyadh",
+        "oil", "crude", "petroleum", "barrel", "brent", "wti",
+        "gas prices", "gasoline", "fuel",
+        "war", "warfare", "military strike", "airstrike", "air strike",
+        "bomb", "bombing", "missile", "missiles", "rocket",
+        "attack", "attacked", "invade", "invasion",
+        "sanction", "sanctions", "embargo",
+        "pipeline", "refinery", "tanker",
+        "ceasefire", "cease fire", "peace deal", "peace talks",
+        "nuclear", "enrichment",
+        "drill baby drill", "drill everywhere", "open up drilling",
+        "lng", "liquefied natural gas",
+        "venezuela", "caracas",
+        "israel", "hamas", "hezbollah", "gaza",
+        "strait", "blockade",
+    ]
     text_lower = text.lower()
+    if not any(topic in text_lower for topic in OIL_TOPICS):
+        return 0, []
+
+    # ── Step 2: Direction scoring ─────────────────────────────────────────────
     total_score = 0
     matched     = []
 
