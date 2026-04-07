@@ -178,7 +178,21 @@ SIGNALS = [
       "not making a deal with iran",
       "beat to hell",                        # "Iran is being beat to HELL"
       "being destroyed",                     # "Iran is being destroyed"
-      "being decimated"], +3, "🟠 Iran escalation"),
+      "being decimated",
+      # Apr 7 2026 patches — regime-change / civilisation-ending language
+      "regime change",                       # "Complete and Total Regime Change"
+      "total regime change",
+      "complete and total regime",
+      "47 years of",                         # "47 years of extortion, corruption"
+      "will die tonight",                    # "a whole civilization will die tonight"
+      "civilization will die",
+      "never to be brought back",
+      "god bless the great people of iran",
+      "great people of iran",
+      "people of iran",                      # sympathetic framing = regime falling
+      "iran will be free",
+      "free iran",
+      "liberate iran"], +3, "🟠 Iran escalation"),
 
     # -------------------------------------------------------------------------
     # WAR / CONFLICT ESCALATION (bullish)
