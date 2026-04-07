@@ -1137,8 +1137,9 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
     # Inject into the PTB context via a fake job context
     class _FakeContext:
         def __init__(self):
-            self.bot      = ptb_app.bot
-            self.bot_data = ptb_app.bot_data
+            self.bot       = ptb_app.bot
+            self.bot_data  = ptb_app.bot_data
+            self.job_queue = ptb_app.job_queue
 
     ctx = _FakeContext()
 
