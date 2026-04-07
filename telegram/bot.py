@@ -29,7 +29,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from news import (
     build_live_summary, build_live_summary_override, get_relevant_trump_posts, refresh_cache,
     score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
-    analogue_signal, format_analogue_signal,
+    analogue_signal, format_analogue_signal, net_signal_text,
 )
 from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
 from llm_score import llm_score_post, format_llm_followup
@@ -739,15 +739,31 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
                 summary, sources          = build_live_summary(current_price, "wti")
                 net_label                 = sources.get("net_label", "")
 
-                # Inject LLM signal so Migas sees the correct sentiment context
-                llm_reason    = post.get("llm_reason", "")
-                llm_direction = post.get("direction", "NEUTRAL")
+                # Inject LLM signal into PREDICTIVE SIGNALS section so the
+                # text encoder picks it up at maximum weight — not appended
+                # after the split point used by splice_summary/counterfactuals.
+                llm_reason     = post.get("llm_reason", "")
+                llm_direction  = post.get("direction", "NEUTRAL")
                 llm_confidence = post.get("llm_confidence", "")
+                llm_sigs       = ", ".join(post.get("llm_signals", []))
+                llm_strength   = net_signal_text(sc)
+
                 if llm_reason:
-                    summary += (
-                        f"\n\nACTIVE SIGNAL ({llm_direction}, score {sc:+d}, {llm_confidence} confidence): "
-                        f"{llm_reason} "
-                        f"Key signals: {', '.join(post.get('llm_signals', []))}"
+                    llm_block = (
+                        f"CURRENT POST SIGNAL ({llm_strength}, score {sc:+d}, "
+                        f"{llm_confidence} confidence): {llm_reason}"
+                        + (f" Key signals: {llm_sigs}." if llm_sigs else "")
+                        + "\n"
+                    )
+                    # Insert at start of PREDICTIVE SIGNALS section
+                    summary = summary.replace(
+                        "PREDICTIVE SIGNALS:\n",
+                        f"PREDICTIVE SIGNALS:\n{llm_block}",
+                    )
+                    # Also update the NET ASSESSMENT line to match LLM direction
+                    summary = summary.replace(
+                        f"NET ASSESSMENT: {net_label}.",
+                        f"NET ASSESSMENT: {llm_strength} (LLM-scored, overrides keyword).",
                     )
 
                 # For extreme posts run counterfactual (bullish + bearish scenarios)
