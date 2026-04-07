@@ -92,9 +92,8 @@ TICKERS = {
 # ---------------------------------------------------------------------------
 # Volume spike detection config
 # ---------------------------------------------------------------------------
-VOLUME_SPIKE_MULTIPLIER  = 3.0    # alert if current 5-min vol > 3x hourly baseline
+VOLUME_SPIKE_MULTIPLIER  = 1.5    # alert if current 5-min vol > 1.5x hourly baseline
 VOLUME_BASELINE_DAYS     = 14     # days of hourly history to build baseline
-VOLUME_POST_LOCKOUT_MIN  = 60     # ignore spikes if Trump posted within this many minutes
 VOLUME_COOLDOWN_MIN      = 30     # minimum minutes between volume spike alerts
 
 # Hourly baseline cache — rebuilt every 24h
@@ -908,12 +907,13 @@ async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
-    """Check CL=F 5-min volume for unusual spikes with no recent Trump post.
+    """Check CL=F 5-min volume for unusual spikes.
 
     Fires an alert if:
-    1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER × hourly baseline
-    2. No Trump post in the last VOLUME_POST_LOCKOUT_MIN minutes
-    3. Cooldown since last volume alert has passed
+    1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER (1.5x) × hourly baseline
+    2. Cooldown since last volume alert has passed
+
+    Always fires regardless of Trump post — instead reports post context in message.
     """
     import pandas as pd
 
@@ -944,23 +944,29 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
         if last_alert and (now - last_alert).total_seconds() < VOLUME_COOLDOWN_MIN * 60:
             return
 
-        # Check Trump post lockout — ignore spike if post came recently
-        post_age_min = _last_trump_post_age_minutes()
-        if post_age_min < VOLUME_POST_LOCKOUT_MIN:
-            log.info("Volume spike %.1fx but Trump posted %.0f min ago — suppressed", ratio, post_age_min)
-            return
-
         context.bot_data["last_volume_alert"] = now
-        notional_m = (current_vol * current_px * 1000) / 1_000_000
+        notional_m   = (current_vol * current_px * 1000) / 1_000_000
+        post_age_min = _last_trump_post_age_minutes()
 
-        # Log for accuracy tracking — direction unknown, mark LONG as default
-        # (volume spikes before Iran posts have been bullish historically)
+        # Trump post context
+        if post_age_min < 60:
+            trump_ctx = f"⚠️ Trump posted *{post_age_min:.0f} min ago* — spike may be post-driven"
+        elif post_age_min < 180:
+            trump_ctx = f"⏱ Last Trump post: {post_age_min:.0f} min ago — monitor for follow-up"
+        else:
+            trump_ctx = f"🔴 No Trump post in last 3h — *possible insider/institutional flow*"
+
+        signal_text = (
+            f"Volume spike {ratio:.1f}x baseline. {current_vol:,.0f} contracts "
+            f"(~${notional_m:.0f}M notional). {trump_ctx.replace('*','').replace('_','')}"
+        )
+
         signal_id = log_signal(
             signal_type    = "volume_spike",
             direction      = "LONG",
             score          = 0,
             price_at_alert = current_px,
-            extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0)},
+            extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0), "post_age_min": round(post_age_min)},
         )
         _schedule_follow_ups(context.job_queue, signal_id, current_px)
 
@@ -969,24 +975,23 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
             ts             = now.isoformat(),
             score          = 0,
             direction      = "NEUTRAL",
-            text           = f"Volume spike detected — {ratio:.1f}x baseline. {current_vol:,.0f} contracts (~${notional_m:.0f}M notional). No Trump post in last {VOLUME_POST_LOCKOUT_MIN} min.",
+            text           = signal_text,
             signals        = [],
             signal_type    = "volume_spike",
             price_at_alert = current_px,
         )
 
-        log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional",
-                 ratio, current_vol, avg_vol, notional_m)
+        log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional, Trump post %.0f min ago",
+                 ratio, current_vol, avg_vol, notional_m, post_age_min)
 
         msg = (
-            f"⚠️ *Unusual Oil Volume Spike*\n\n"
-            f"CL=F 5-min volume: `{current_vol:,.0f}` contracts\n"
-            f"Baseline (hour avg): `{avg_vol:,.0f}` contracts\n"
-            f"Spike: `{ratio:.1f}x` baseline\n"
+            f"⚡ *Volume Spike — CL=F*\n\n"
+            f"Volume: `{current_vol:,.0f}` contracts\n"
+            f"Baseline: `{avg_vol:,.0f}` contracts\n"
+            f"Spike: `{ratio:.1f}x`\n"
             f"Notional: `~${notional_m:.0f}M`\n"
             f"Price: `${current_px:.2f}`\n\n"
-            f"⏱ No Trump post in last {VOLUME_POST_LOCKOUT_MIN} min\n"
-            f"_Watch for a post — Mar 23 pattern: spike → post → -7% in 15 min_"
+            f"{trump_ctx}"
         )
         for uid in ALLOWED_USER_IDS:
             try:
