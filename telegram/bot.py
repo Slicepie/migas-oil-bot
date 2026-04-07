@@ -527,17 +527,26 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     msg = await update.message.reply_text("⏳ Calculating signal…")
     try:
+        import pytz
         _, current_price = fetch_prices("wti")
         posts    = get_scored_posts()
+        et_tz    = pytz.timezone("America/New_York")
+        now_utc  = datetime.now(timezone.utc)
+        cutoff   = now_utc - timedelta(hours=24)
 
-        # Only look at posts from the last 48 hours
-        cutoff   = (datetime.now(timezone.utc) - timedelta(hours=48)).date().isoformat()
-        recent   = [p for p in posts if p.get("date", "") >= cutoff]
+        def post_utc(p: dict):
+            try:
+                d = datetime.fromisoformat(f"{p['date']}T{p.get('time_et', '00:00:00')}")
+                return et_tz.localize(d).astimezone(timezone.utc)
+            except Exception:
+                return datetime.min.replace(tzinfo=timezone.utc)
+
+        recent = [p for p in posts if post_utc(p) >= cutoff]
 
         if not recent:
             await msg.edit_text(
                 "⚪ *No recent signal*\n\n"
-                "No oil-relevant Trump posts in the last 48 hours.\n"
+                "No oil-relevant Trump posts in the last 24 hours.\n"
                 "_Monitoring continues — you'll be alerted when a new post is detected._",
                 parse_mode="Markdown",
             )
@@ -546,19 +555,10 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         top      = max(recent, key=lambda p: abs(p.get("score", 0)))
         text     = format_analogue_signal(top, current_price)
 
-        # Add staleness warning if post is older than 4 hours
-        post_date = top.get("date", "")
-        post_time = top.get("time_et", "") or "00:00:00"
-        try:
-            import pytz
-            et  = pytz.timezone("America/New_York")
-            dt  = datetime.fromisoformat(f"{post_date}T{post_time}")
-            dt  = et.localize(dt).astimezone(timezone.utc)
-            age = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-            if age > 4:
-                text = f"⚠️ _Signal is {age:.0f}h old — market may have already reacted_\n\n" + text
-        except Exception:
-            pass
+        # Staleness warning if post is older than 4 hours
+        age_h = (now_utc - post_utc(top)).total_seconds() / 3600
+        if age_h > 4:
+            text = f"⚠️ _Signal is {age_h:.0f}h old — market may have already reacted_\n\n" + text
 
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as exc:
