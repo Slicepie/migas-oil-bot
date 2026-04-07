@@ -834,9 +834,9 @@ async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
             signal_type    = "trump_post",
             url            = p.get("url", ""),
             price_at_alert = price_now,
-            avg15m         = analogue.get("avg_15m_move"),
-            avg1h          = analogue.get("avg_1h_move"),
-            est24h         = analogue.get("est_24h_move"),
+            avg15m         = analogue.get("avg_15m"),
+            avg1h          = analogue.get("avg_1h"),
+            est24h         = analogue.get("est_24h"),
             hit_rate_1h    = analogue.get("hit_rate_1h"),
         )
 
@@ -1153,9 +1153,9 @@ async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
             signal_type    = "trump_post",
             url            = p.get("url", ""),
             price_at_alert = price_now,
-            avg15m         = analogue.get("avg_15m_move"),
-            avg1h          = analogue.get("avg_1h_move"),
-            est24h         = analogue.get("est_24h_move"),
+            avg15m         = analogue.get("avg_15m"),
+            avg1h          = analogue.get("avg_1h"),
+            est24h         = analogue.get("est_24h"),
             hit_rate_1h    = analogue.get("hit_rate_1h"),
         )
 

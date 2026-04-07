@@ -689,11 +689,15 @@ def get_relevant_trump_posts() -> list[dict]:
     """
     existing_texts = {p["text"] for p in _read_cache()}
     new_raw        = fetch_posts_apify_incremental()
+    log.info("Apify returned %d raw posts; %d already in cache",
+             len(new_raw), sum(1 for p in new_raw if p.get("text", p.get("content","")) in existing_texts))
     if not new_raw:
         return []
     append_new_posts(new_raw)
     new_scored = _score_raw_posts(new_raw)
-    return [p for p in new_scored if p["text"] not in existing_texts]
+    relevant   = [p for p in new_scored if p["text"] not in existing_texts]
+    log.info("New oil-relevant posts after scoring: %d", len(relevant))
+    return relevant
 
 
 # ---------------------------------------------------------------------------
