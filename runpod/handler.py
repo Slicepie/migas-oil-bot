@@ -1,5 +1,6 @@
 """
 RunPod serverless worker for Migas-1.5 oil price forecasting.
+Worker version: 2 — counterfactual bull/bear scenarios supported.
 
 Expected input payload:
 {
