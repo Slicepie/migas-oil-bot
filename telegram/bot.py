@@ -404,9 +404,17 @@ async def run_forecast(instrument: str, update: Update):
             f"{unconfirmed} unconfirmed signals\n"
             f"Signal: {net_label}"
         )
-        await msg.edit_text(f"⏳ Running Migas-1.5 forecast (ensemble)…\n{news_line}")
+        # Derive score + direction from net_label for dashboard
+        net_score = sources.get("net_score", 0)
+        direction = "BULLISH" if net_score > 0 else "BEARISH" if net_score < 0 else "NEUTRAL"
 
-        output   = get_forecast(price_data, summary, n_summaries=5)
+        await msg.edit_text(f"⏳ Running Migas-1.5 forecast + scenarios…\n{news_line}")
+
+        output   = get_forecast(
+            price_data, summary,
+            n_summaries    = 5,
+            counterfactual = True,   # always get bull/bear scenarios
+        )
         forecast = output["forecast"]
         text     = format_forecast(forecast, current_price, instrument)
         text    += f"\n\n📰 {net_label}"
@@ -414,13 +422,13 @@ async def run_forecast(instrument: str, update: Update):
 
         # Save to USOIL.AI dashboard for vs-reality tracking
         save_forecast_to_dashboard(
-            instrument=instrument,
-            current_price=current_price,
-            output=output,
-            summary=summary,
-            score=0,
-            direction="NEUTRAL",
-            pred_len=16,
+            instrument    = instrument,
+            current_price = current_price,
+            output        = output,
+            summary       = summary,
+            score         = net_score,
+            direction     = direction,
+            pred_len      = 16,
         )
     except Exception as exc:
         log.exception("Forecast error")
