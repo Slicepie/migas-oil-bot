@@ -366,6 +366,42 @@ def format_forecast(forecast: list[float], current_price: float, instrument: str
     lines += ["", "_Powered by Migas-1.5 · 60-day post-war window_"]
     return "\n".join(lines)
 
+
+def format_scenarios(output: dict, current_price: float) -> str:
+    """Format bull / base / bear / chronos end-of-horizon targets."""
+    base    = output.get("forecast", [])
+    bull    = output.get("forecast_bullish")
+    bear    = output.get("forecast_bearish")
+    chronos = output.get("chronos_baseline")
+
+    if not base:
+        return ""
+
+    pred_len = len(base)
+    lines = ["", f"📊 *Scenarios — Day {pred_len} target*"]
+
+    if bear:
+        ep = bear[-1]; pp = (ep - current_price) / current_price * 100
+        lines.append(f"🐻 Bear:    `${ep:.2f}` ({pp:+.1f}%)")
+
+    ep = base[-1]; pp = (ep - current_price) / current_price * 100
+    lines.append(f"🎯 Base:    `${ep:.2f}` ({pp:+.1f}%)")
+
+    if bull:
+        ep = bull[-1]; pp = (ep - current_price) / current_price * 100
+        lines.append(f"🐂 Bull:    `${ep:.2f}` ({pp:+.1f}%)")
+
+    if chronos:
+        ep = chronos[-1]; pp = (ep - current_price) / current_price * 100
+        lines.append(f"⚙️ Chronos: `${ep:.2f}` ({pp:+.1f}%)")
+
+    if bull and bear:
+        spread = abs(bull[-1] - bear[-1])
+        lines.append(f"_Spread: ${spread:.2f}_")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -417,6 +453,7 @@ async def run_forecast(instrument: str, update: Update):
         )
         forecast = output["forecast"]
         text     = format_forecast(forecast, current_price, instrument)
+        text    += format_scenarios(output, current_price)
         text    += f"\n\n📰 {net_label}"
         await msg.edit_text(text, parse_mode="Markdown")
 

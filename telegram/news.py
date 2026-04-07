@@ -987,6 +987,11 @@ def format_analogue_signal(post: dict, current_price: float) -> str:
             f"Signals: {signals}"
         )
 
+    # Dollar-amount equivalents at current price
+    d15m = current_price * r["avg_15m"] / 100
+    d1h  = current_price * r["avg_1h"]  / 100
+    d24h = current_price * r["est_24h"] / 100
+
     lines = [
         f"{emoji} *Trader Signal* — {side} `{score:+d}`",
         f"",
@@ -994,11 +999,12 @@ def format_analogue_signal(post: dict, current_price: float) -> str:
         f"",
         f"*Signals:* {signals}",
         f"",
-        f"*Expected moves* (based on {r['n_analogues']} similar posts):",
-        f"  15 min:  `{r['avg_15m']:+.1f}%`  (hit rate: {r['hit_rate_15m']:.0%})",
-        f"  1 hr:    `{r['avg_1h']:+.1f}%`  (hit rate: {r['hit_rate_1h']:.0%})",
-        f"  24 hr:   `{r['est_24h']:+.1f}%`  (extrapolated)",
-        f"  Max seen: `{r['max_move_15m']:+.1f}%` in 15min, `{r['max_move_1h']:+.1f}%` in 1hr",
+        f"*⏱ Expected moves* ({r['n_analogues']} analogues)",
+        f"┌─────────────────────────────────────",
+        f"│ *15 min*  `{r['avg_15m']:+.2f}%`  `${d15m:+.2f}`   hit {r['hit_rate_15m']:.0%}",
+        f"│  *1 hr*   `{r['avg_1h']:+.2f}%`  `${d1h:+.2f}`   hit {r['hit_rate_1h']:.0%}",
+        f"│ *24 hr*   `{r['est_24h']:+.2f}%`  `${d24h:+.2f}`   extrapolated",
+        f"└─────────────────────────────────────",
         f"",
         f"*Action:*",
     ]
