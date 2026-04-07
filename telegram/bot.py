@@ -1067,8 +1067,8 @@ async def handle_apify_webhook(request: web.Request) -> web.Response:
     """Receive Apify webhook when a scheduled Truth Social scrape completes.
 
     Apify POSTs to /webhook/{WEBHOOK_SECRET} when the actor run succeeds.
-    We fetch the run's dataset, score the posts, and fire alerts immediately —
-    no polling lag.
+    We fetch the run's dataset async (non-blocking), then fire a background task
+    to score + alert — returns 200 immediately so Apify doesn't retry.
     """
     secret = request.match_info.get("secret", "")
     if secret != WEBHOOK_SECRET:
@@ -1085,12 +1085,15 @@ async def handle_apify_webhook(request: web.Request) -> web.Response:
 
         log.info("Apify webhook received for run %s", run_id)
 
-        # Fetch posts from this specific run's dataset
-        url  = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items"
-        resp = requests.get(url, params={"token": APIFY_API_TOKEN}, timeout=30)
-        log.info("Dataset fetch: status=%s url=%s", resp.status_code, url)
-        resp.raise_for_status()
-        raw_posts = resp.json()
+        # Fetch dataset async — do NOT use requests.get (blocks event loop)
+        import aiohttp as _aiohttp
+        url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items"
+        async with _aiohttp.ClientSession() as session:
+            async with session.get(url, params={"token": APIFY_API_TOKEN}, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
+                log.info("Dataset fetch: status=%s url=%s", resp.status, url)
+                resp.raise_for_status()
+                raw_posts = await resp.json()
+
         log.info("Dataset fetch returned %d items (first 200 chars): %s",
                  len(raw_posts), str(raw_posts)[:200])
 
@@ -1098,9 +1101,9 @@ async def handle_apify_webhook(request: web.Request) -> web.Response:
             log.warning("Webhook run %s dataset is empty — nothing to process", run_id)
             return web.Response(status=200)
 
-        # Put in queue for the main loop to process
-        request.app["post_queue"].put_nowait(raw_posts)
-        log.info("Queued %d raw posts from webhook", len(raw_posts))
+        log.info("Scheduling processing of %d raw posts from webhook", len(raw_posts))
+        ptb_app = request.app["ptb_app"]
+        asyncio.create_task(process_webhook_posts(ptb_app, raw_posts))
 
     except Exception:
         log.exception("Webhook handler error")
@@ -1110,6 +1113,13 @@ async def handle_apify_webhook(request: web.Request) -> web.Response:
 
 async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
     """Score and process posts received via webhook, fire alerts if relevant."""
+    try:
+        await _process_webhook_posts_inner(ptb_app, raw_posts)
+    except Exception:
+        log.exception("process_webhook_posts crashed — raw_posts count=%d", len(raw_posts))
+
+
+async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) -> None:
     existing_texts = {p["text"] for p in __import__('news')._read_cache()}
     append_new_posts(raw_posts)
     new_scored = _score_raw_posts(raw_posts)
@@ -1211,9 +1221,8 @@ async def main_async():
     ).timetz())
 
     # Build aiohttp webhook server
-    post_queue = asyncio.Queue()
-    aio_app    = web.Application()
-    aio_app["post_queue"] = post_queue
+    aio_app = web.Application()
+    aio_app["ptb_app"] = ptb_app   # webhook handler needs this to fire tasks
     aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
     aio_app.router.add_get("/signal",            handle_signal_api)
 
@@ -1228,14 +1237,10 @@ async def main_async():
     await ptb_app.updater.start_polling(drop_pending_updates=True)
     log.info("Migas Oil Bot started")
 
-    # Main loop — drain webhook queue
+    # Keep running until interrupted — webhook tasks fire via asyncio.create_task()
+    stop_event = asyncio.Event()
     try:
-        while True:
-            try:
-                raw_posts = await asyncio.wait_for(post_queue.get(), timeout=5.0)
-                await process_webhook_posts(ptb_app, raw_posts)
-            except asyncio.TimeoutError:
-                pass   # nothing in queue, keep looping
+        await stop_event.wait()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
