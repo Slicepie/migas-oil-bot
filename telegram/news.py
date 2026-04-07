@@ -525,12 +525,11 @@ def fetch_posts_apify_incremental(max_posts: int = 50) -> list[dict]:
             APIFY_ENDPOINT,
             params={"token": APIFY_API_TOKEN},
             json={
-                "username":      "realDonaldTrump",
-                "maxPosts":      max_posts,
-                "useLastPostId": True,
-                "cleanContent":  True,
-                "onlyReplies":   False,
-                "onlyMedia":     False,
+                "username":     "realDonaldTrump",
+                "maxPosts":     max_posts,
+                "cleanContent": True,
+                "onlyReplies":  False,
+                "onlyMedia":    False,
             },
             timeout=60,
         )
