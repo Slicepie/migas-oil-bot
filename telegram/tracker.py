@@ -21,24 +21,18 @@ LOG_FILE = Path(__file__).parent / "signal_log.jsonl"
 
 
 def _current_wti() -> float | None:
-    """Fetch current USO price — used for signal accuracy tracking.
-    USO is the oil ETF used in the HuggingFace dataset analogues.
-    Falls back to CL=F (WTI futures) outside USO market hours.
+    """Fetch current WTI futures price (CL=F).
+    Always uses CL=F so price_at_alert is on the same instrument as the
+    dashboard scorer which fetches CL=F from Yahoo Finance.
     """
-    try:
-        ticker = yf.Ticker("USO")
-        hist   = ticker.history(period="1d", interval="5m")[["Close"]]
-        if not hist.empty:
-            return round(float(hist["Close"].iloc[-1]), 2)
-    except Exception:
-        pass
     try:
         ticker = yf.Ticker("CL=F")
         hist   = ticker.history(period="1d", interval="5m")[["Close"]]
-        return round(float(hist["Close"].iloc[-1]), 2)
+        if not hist.empty:
+            return round(float(hist["Close"].iloc[-1]), 2)
     except Exception as exc:
-        log.warning("tracker: failed to fetch price: %s", exc)
-        return None
+        log.warning("tracker: failed to fetch CL=F price: %s", exc)
+    return None
 
 
 def log_signal(

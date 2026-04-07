@@ -32,6 +32,7 @@ from news import (
     analogue_signal, format_analogue_signal,
 )
 from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
+from llm_score import llm_score_post, format_llm_followup
 
 load_dotenv()
 
@@ -1148,27 +1149,61 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
     ctx = _FakeContext()
 
-    # Alert
+    # ── Step 1: Immediate alert — raw post + keyword score ───────────────────
     for uid in ALLOWED_USER_IDS:
         try:
-            lines = ["⚡ *Trump posted* (via webhook)\n"]
             for p in new_posts[:3]:
-                lines.append(f"{score_emoji(p['score'])} `{p['score']:+d}` _{p['text'][:300]}_")
-            await ptb_app.bot.send_message(
-                chat_id=uid, text="\n\n".join(lines), parse_mode="Markdown"
-            )
+                kw_score = p["score"]
+                dir_arrow = "▲" if kw_score > 0 else ("▼" if kw_score < 0 else "—")
+                direction = "BULL" if kw_score > 0 else ("BEAR" if kw_score < 0 else "FLAT")
+                text = (
+                    f"⚡ *Trump posted*\n\n"
+                    f"_{p['text'][:400]}_\n\n"
+                    f"{score_emoji(kw_score)} Keyword: `{kw_score:+d}` {dir_arrow} {direction}\n"
+                    f"_LLM analysis incoming…_"
+                )
+                await ptb_app.bot.send_message(
+                    chat_id=uid, text=text, parse_mode="Markdown"
+                )
         except Exception:
-            log.exception("Webhook alert send failed")
+            log.exception("Webhook immediate alert send failed")
 
-    # Save all new signals to USOIL.AI dashboard
+    # ── Step 2: LLM follow-up after 2s ───────────────────────────────────────
+    import asyncio as _asyncio
+    await _asyncio.sleep(2)
+
     price_now = _current_wti()
-    # Fallback: if USO/CL=F intraday unavailable, use last daily close from yfinance
     if price_now is None:
         try:
             _, price_now = fetch_prices("wti")
-            log.info("price_at_alert fallback to daily close: %.2f", price_now)
         except Exception:
-            log.warning("Could not fetch price_at_alert — outcomes will not be scored")
+            pass
+
+    for uid in ALLOWED_USER_IDS:
+        for p in new_posts[:3]:
+            try:
+                llm = await llm_score_post(p["text"])
+                if llm:
+                    followup_text = format_llm_followup(
+                        post_text = p["text"],
+                        kw_score  = p["score"],
+                        llm       = llm,
+                        price     = price_now,
+                    )
+                    await ptb_app.bot.send_message(
+                        chat_id=uid, text=followup_text, parse_mode="Markdown"
+                    )
+                    # Override score/direction with LLM result for downstream use
+                    p["score"]     = llm.get("score", p["score"])
+                    p["direction"] = llm.get("direction", p.get("direction", "NEUTRAL"))
+                    p["llm_reason"] = llm.get("reason", "")
+            except Exception:
+                log.exception("LLM follow-up failed for uid %s", uid)
+
+    # Save all new signals to USOIL.AI dashboard
+    # price_now already fetched above for LLM step; fallback if still None
+    if price_now is None:
+        log.warning("Could not fetch price_at_alert — outcomes will not be scored")
 
     for p in new_posts:
         sc       = p.get("score", 0)
