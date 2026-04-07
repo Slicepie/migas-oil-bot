@@ -412,6 +412,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛢️ *Migas Oil Bot*\n\n"
         "Commands:\n"
         "/signal — trader signal (15min/1hr/24hr) from post analogues\n"
+        "/signals — list last 10 saved signals\n"
         "/stats — signal accuracy report\n"
         "/forecast — 16-day WTI forecast (Migas-1.5)\n"
         "/brent — 16-day Brent forecast (Migas-1.5)\n"
@@ -564,6 +565,76 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:
         log.exception("Signal command error")
         await msg.edit_text(f"❌ Error: {exc}")
+
+
+@restricted
+async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the last 10 saved signals from the dashboard."""
+    if not USOIL_AI_URL:
+        await update.message.reply_text("❌ USOIL_AI_URL not configured.")
+        return
+
+    try:
+        resp = requests.get(f"{USOIL_AI_URL.rstrip('/')}/api/signals", timeout=10)
+        if not resp.ok:
+            await update.message.reply_text(f"❌ API error: {resp.status_code}")
+            return
+
+        data    = resp.json()
+        signals = data.get("signals", [])
+        source  = data.get("source", "?")
+
+        if not signals:
+            await update.message.reply_text("⚪ No signals saved yet.")
+            return
+
+        lines = [f"📡 *Recent Signals* ({'live' if source == 'kv' else 'mock'})\n"]
+
+        for s in signals[:10]:
+            ts       = s.get("ts", "")
+            score    = s.get("score", 0)
+            dirn     = s.get("direction", "NEUTRAL")
+            text     = s.get("text", "")[:120]
+            stype    = s.get("type", "trump_post")
+            avg15m   = s.get("avg15m")
+            avg1h    = s.get("avg1h")
+            price    = s.get("price_at_alert")
+
+            # Age
+            try:
+                dt  = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                age = (datetime.now(timezone.utc) - dt).total_seconds()
+                if age < 3600:
+                    age_str = f"{int(age/60)}m ago"
+                elif age < 86400:
+                    age_str = f"{int(age/3600)}h ago"
+                else:
+                    age_str = f"{int(age/86400)}d ago"
+            except Exception:
+                age_str = "?"
+
+            # Direction arrow
+            arrow = "📈" if dirn == "BULLISH" else ("📉" if dirn == "BEARISH" else "➡️")
+            score_str = f"{score:+d}" if isinstance(score, int) else str(score)
+            type_tag  = "⚡" if stype == "volume_spike" else "🐦"
+
+            # Moves line
+            moves = ""
+            if avg15m is not None and avg1h is not None:
+                moves = f"  `15m {avg15m:+.1f}% · 1h {avg1h:+.1f}%`\n"
+
+            price_str = f" · `${price:.2f}`" if price else ""
+            lines.append(
+                f"{arrow} `{score_str}` {type_tag} _{age_str}{price_str}_\n"
+                f"_{text}_\n"
+                f"{moves}"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as exc:
+        log.exception("cmd_signals error")
+        await update.message.reply_text(f"❌ Error: {exc}")
 
 
 @restricted
@@ -1114,6 +1185,7 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("forecast",     cmd_forecast))
     ptb_app.add_handler(CommandHandler("brent",        cmd_brent))
     ptb_app.add_handler(CommandHandler("signal",       cmd_signal))
+    ptb_app.add_handler(CommandHandler("signals",      cmd_signals))
     ptb_app.add_handler(CommandHandler("stats",        cmd_stats))
     ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
     ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
