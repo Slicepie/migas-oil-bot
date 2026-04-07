@@ -1162,12 +1162,21 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
     # Save all new signals to USOIL.AI dashboard
     price_now = _current_wti()
+    # Fallback: if USO/CL=F intraday unavailable, use last daily close from yfinance
+    if price_now is None:
+        try:
+            _, price_now = fetch_prices("wti")
+            log.info("price_at_alert fallback to daily close: %.2f", price_now)
+        except Exception:
+            log.warning("Could not fetch price_at_alert — outcomes will not be scored")
+
     for p in new_posts:
         sc       = p.get("score", 0)
+        sig_id   = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}"
         sig_list = list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", []))
         analogue = analogue_signal(p) if abs(sc) >= 2 else {}
         save_signal_to_dashboard(
-            signal_id      = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}",
+            signal_id      = sig_id,
             ts             = datetime.now(timezone.utc).isoformat(),
             score          = sc,
             direction      = "BULLISH" if sc > 0 else ("BEARISH" if sc < 0 else "NEUTRAL"),
@@ -1181,6 +1190,17 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             est24h         = analogue.get("est_24h"),
             hit_rate_1h    = analogue.get("hit_rate_1h"),
         )
+        # Schedule local follow-up checks at 15m / 1h / 24h
+        if price_now and sc != 0:
+            local_sig_id = log_signal(
+                signal_type    = "trump_post",
+                direction      = "LONG" if sc > 0 else "SHORT",
+                score          = sc,
+                price_at_alert = price_now,
+                post_text      = p.get("text", ""),
+                extra          = {"signals": sig_list, "dashboard_id": sig_id},
+            )
+            _schedule_follow_ups(ctx.job_queue, local_sig_id, price_now)
 
     # Auto-forecast
     top = max(new_posts, key=lambda p: abs(p["score"]))
