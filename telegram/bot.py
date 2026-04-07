@@ -1112,10 +1112,13 @@ async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
     new_scored = _score_raw_posts(raw_posts)
     new_posts  = [p for p in new_scored if p["text"] not in existing_texts]
 
+    log.info("Webhook: %d raw → %d scored → %d new oil-relevant",
+             len(raw_posts), len(new_scored), len(new_posts))
+
     if not new_posts:
         return
 
-    log.info("Webhook: %d new oil-relevant posts", len(new_posts))
+    log.info("Webhook: firing alerts for %d new posts", len(new_posts))
 
     # Reuse the same alert + auto-forecast logic as the polling job
     # Inject into the PTB context via a fake job context
