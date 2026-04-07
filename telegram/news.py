@@ -665,13 +665,27 @@ def _score_raw_posts(raw_posts: list[dict]) -> list[dict]:
         # A post is "confirmed" if it has an actual USO market reaction >= 0.5%
         confirmed = uso_pct_5m is not None and abs(uso_pct_5m) >= 0.5
 
+        # Normalise date/time — HF posts have "date"/"time_eastern",
+        # Apify posts have "created_at" (UTC ISO string)
+        raw_date    = p.get("date", "")
+        raw_time_et = p.get("time_eastern", "")
+        if not raw_date and p.get("created_at"):
+            try:
+                import pytz as _pytz
+                _utc_dt = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
+                _et_dt  = _utc_dt.astimezone(_pytz.timezone("America/New_York"))
+                raw_date    = _et_dt.strftime("%Y-%m-%d")
+                raw_time_et = _et_dt.strftime("%H:%M:%S")
+            except Exception:
+                pass
+
         scored.append({
             "text":       text,
             "score":      score,
             "signals":    signals,
             "url":        p.get("url", ""),
-            "date":       p.get("date", ""),
-            "time_et":    p.get("time_eastern", ""),
+            "date":       raw_date,
+            "time_et":    raw_time_et,
             "uso_pct_5m": uso_pct_5m,
             "uso_pct_1h": uso_pct_1h,
             "confirmed":  confirmed,
