@@ -15,6 +15,7 @@ Private: only ALLOWED_USER_IDS can interact with the bot.
 """
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ from news import (
     analogue_signal, format_analogue_signal, net_signal_text,
 )
 from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
-from llm_score import llm_score_post, format_llm_followup
+from llm_score import llm_score_post, llm_score_multi_market, format_llm_followup, format_multi_market_alert, MARKET_TICKERS, THEME_EXPECTATIONS
 
 load_dotenv()
 
@@ -57,6 +58,12 @@ AUTO_FORECAST_PRED_LEN       = 5    # days — shorter forecasts are more accura
 WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "changeme")
 WEBHOOK_PORT    = int(os.environ.get("WEBHOOK_PORT", "8080"))
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
+
+# Trader API webhook — fires BEFORE Telegram for lowest latency
+SIGNAL_WEBHOOK_URLS: list[str] = [
+    u.strip() for u in os.environ.get("SIGNAL_WEBHOOK_URLS", "").split(",") if u.strip()
+]
+SIGNAL_WEBHOOK_SECRET = os.environ.get("SIGNAL_WEBHOOK_SECRET", "")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -285,6 +292,12 @@ def save_signal_to_dashboard(
     avg1h:          float | None = None,
     est24h:         float | None = None,
     hit_rate_1h:    float | None = None,
+    # Multi-market fields
+    markets:        dict | None = None,
+    prices_at_alert: dict | None = None,
+    post_theme:     str | None = None,
+    primary_market: str | None = None,
+    cross_market_consistency: str | None = None,
 ) -> None:
     """POST a signal event to USOIL.AI dashboard for the live signal feed.
     Silently ignores errors so it never blocks the bot."""
@@ -306,6 +319,11 @@ def save_signal_to_dashboard(
             "avg1h":          avg1h,
             "est24h":         est24h,
             "hit_rate_1h":    hit_rate_1h,
+            "markets":        markets,
+            "prices_at_alert": prices_at_alert,
+            "post_theme":     post_theme,
+            "primary_market": primary_market,
+            "cross_market_consistency": cross_market_consistency,
         }
         resp = requests.post(
             f"{USOIL_AI_URL}/api/signals/save",
@@ -318,6 +336,128 @@ def save_signal_to_dashboard(
             log.warning("Dashboard signal save failed: %s %s", resp.status_code, resp.text[:200])
     except Exception as exc:
         log.warning("Dashboard signal save error (non-fatal): %s", exc)
+
+
+import hashlib
+import hmac
+import time as _time
+
+# ---------------------------------------------------------------------------
+# Upstash Redis pub/sub — publishes signals to SSE stream subscribers
+# ---------------------------------------------------------------------------
+
+UPSTASH_REDIS_REST_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+
+def _publish_to_redis(channel: str, payload: dict) -> None:
+    """Publish a signal to Upstash Redis for SSE stream subscribers. Non-blocking, best-effort."""
+    if not UPSTASH_REDIS_REST_URL:
+        return
+    try:
+        requests.post(
+            f"{UPSTASH_REDIS_REST_URL}/publish/{channel}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            json=payload,
+            timeout=3,
+        )
+    except Exception as exc:
+        log.warning("Redis publish failed on %s: %s", channel, exc)
+
+
+async def publish_signal_to_stream(
+    signal_id: str,
+    ts: str,
+    market: str,
+    direction: str,
+    score: int,
+    confidence: str,
+    theme: str,
+    price_at_signal: float | None,
+    text_preview: str,
+) -> None:
+    """Publish signal to Upstash Redis pub/sub for SSE stream consumers."""
+    if not UPSTASH_REDIS_REST_URL:
+        return
+
+    expectations = THEME_EXPECTATIONS.get(theme, {})
+    event = {
+        "signal_id":      signal_id,
+        "ts":             ts,
+        "market":         market,
+        "data": {
+            "score":       score,
+            "direction":   direction,
+            "confidence":  confidence,
+            "est_move_pct": expectations.get("est_move_pct"),
+            "rationale":   "",
+        },
+        "price":           price_at_signal,
+        "post_theme":      theme,
+        "ambiguity_flag":  False,
+        "text_preview":    text_preview[:200],
+        "hold_window":     expectations.get("hold_window"),
+        "hit_rate":        expectations.get("hit_rate"),
+    }
+
+    channel = f"market-signal:{market}"
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _publish_to_redis, channel, event)
+
+
+async def dispatch_signal_webhook(
+    signal_id: str,
+    ts: str,
+    market: str,
+    direction: str,
+    score: int,
+    confidence: str,
+    theme: str,
+    price_at_signal: float | None,
+) -> None:
+    """Fire trader webhook ASAP — runs before Telegram, never blocks on failure."""
+    if not SIGNAL_WEBHOOK_URLS:
+        return
+
+    expectations = THEME_EXPECTATIONS.get(theme, {})
+    payload = {
+        "signal_id":      signal_id,
+        "ts":             ts,
+        "market":         market,
+        "direction":      direction,
+        "score":          score,
+        "confidence":     confidence,
+        "theme":          theme,
+        "price_at_signal": price_at_signal,
+        "est_move_pct":   expectations.get("est_move_pct"),
+        "hold_window":    expectations.get("hold_window"),
+        "hit_rate":       expectations.get("hit_rate"),
+    }
+
+    # HMAC signature for webhook auth
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    timestamp = str(int(_time.time()))
+    sig_input = f"{timestamp}.{body}"
+    signature = hmac.new(
+        SIGNAL_WEBHOOK_SECRET.encode(), sig_input.encode(), hashlib.sha256
+    ).hexdigest() if SIGNAL_WEBHOOK_SECRET else ""
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Signal-Timestamp": timestamp,
+        "X-Signal-Signature": signature,
+    }
+
+    loop = asyncio.get_event_loop()
+    for url in SIGNAL_WEBHOOK_URLS:
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda u=url: requests.post(u, data=body, headers=headers, timeout=5),
+            )
+            log.info("Signal webhook dispatched to %s", url)
+        except Exception as exc:
+            log.warning("Signal webhook failed for %s: %s", url, exc)
 
 
 def build_summary(current_price: float, instrument: str = "wti") -> str:
@@ -1174,58 +1314,150 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
     ctx = _FakeContext()
 
-    # ── Score all posts with LLM + fetch price in parallel ───────────────────
+    # ── Score all posts: multi-market streaming LLM + price fetch in parallel ──
     import asyncio as _asyncio
 
-    async def _score_and_price(p: dict):
-        llm, price = await _asyncio.gather(
-            llm_score_post(p["text"]),
-            _asyncio.get_event_loop().run_in_executor(None, _current_wti),
-        )
-        return llm, price
+    async def _fetch_all_prices() -> dict[str, float | None]:
+        """Fetch all 8 market prices in parallel (best-effort, never raises)."""
+        import yfinance as _yf
+
+        def _fetch_one(ticker: str) -> float | None:
+            try:
+                hist = _yf.Ticker(ticker).history(period="1d", interval="5m")[["Close"]]
+                if not hist.empty:
+                    return round(float(hist["Close"].iloc[-1]), 4)
+            except Exception:
+                pass
+            return None
+
+        loop = _asyncio.get_event_loop()
+        tasks = {
+            market: loop.run_in_executor(None, _fetch_one, ticker)
+            for market, ticker in MARKET_TICKERS.items()
+        }
+        results: dict[str, float | None] = {}
+        for market, coro in tasks.items():
+            try:
+                results[market] = await coro
+            except Exception:
+                results[market] = None
+        return results
 
     for p in new_posts[:3]:
-        llm, price_now = await _score_and_price(p)
+        text_body = p["text"]
+        kw_score  = p["score"]
 
-        # Fallback price
+        # Collect all market signals and prices in parallel
+        all_markets: dict[str, dict] = {}
+        meta_block: dict              = {}
+
+        prices_task = _asyncio.ensure_future(_fetch_all_prices())
+
+        async for market, data in llm_score_multi_market(text_body):
+            if market == "_meta":
+                meta_block = data
+            else:
+                all_markets[market] = data
+
+        # Await prices (already running while LLM was streaming)
+        try:
+            prices_at_alert = await prices_task
+        except Exception:
+            prices_at_alert = {m: None for m in MARKET_TICKERS}
+
+        # OIL is the primary signal for backward compat (Migas context / tracker)
+        oil   = all_markets.get("OIL", {})
+        sc    = oil.get("score", kw_score)
+        dirn  = oil.get("direction", "NEUTRAL")
+        conf  = oil.get("confidence", "LOW")
+        reason = oil.get("rationale", "")
+        price_now = prices_at_alert.get("OIL")
+
+        # Fallback WTI price
+        if price_now is None:
+            price_now = _current_wti()
         if price_now is None:
             try:
                 _, price_now = fetch_prices("wti")
             except Exception:
                 pass
 
-        kw_score = p["score"]
+        # Override p["score"] so auto-forecast uses LLM score
+        if oil:
+            p["score"]     = sc
+            p["direction"] = dirn
 
-        # LLM is the signal — override keyword score
-        if llm:
-            p["score"]      = llm["score"]
-            p["direction"]  = llm["direction"]
-            p["llm_reason"] = llm.get("reason", "")
-            p["llm_confidence"] = llm.get("confidence", "")
-            p["llm_signals"]    = llm.get("key_signals", [])
+        # ── Trader webhook — fires FIRST for lowest latency ───────────────────
+        sig_id = f"sig_{p.get('date', '')}_{abs(hash(text_body))}"
+        theme  = meta_block.get("post_theme", "UNRELATED")
 
-        sc        = p["score"]
-        direction = p.get("direction", "NEUTRAL")
-        reason    = p.get("llm_reason", "")
-        confidence = p.get("llm_confidence", "")
-        key_sigs  = p.get("llm_signals", [])
+        sig_ts = datetime.now(timezone.utc).isoformat()
 
-        dir_arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "—")
-        dir_label = "BULL" if sc > 0 else ("BEAR" if sc < 0 else "FLAT")
-        conf_flag = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(confidence, "")
-        kw_line   = f"\n_Keyword score: `{kw_score:+d}`_" if kw_score != sc else ""
-        sigs_line = f"\n🏷 {' · '.join(f'`{s}`' for s in key_sigs[:4])}" if key_sigs else ""
-        price_line = f"\n💵 WTI: `${price_now:.2f}`" if price_now else ""
+        if dirn != "NEUTRAL" and sc != 0:
+            # Fire webhook + SSE pub/sub in parallel — both before Telegram
+            await asyncio.gather(
+                dispatch_signal_webhook(
+                    signal_id      = sig_id,
+                    ts             = sig_ts,
+                    market         = "OIL",
+                    direction      = dirn,
+                    score          = sc,
+                    confidence     = conf,
+                    theme          = theme,
+                    price_at_signal = price_now,
+                ),
+                publish_signal_to_stream(
+                    signal_id      = sig_id,
+                    ts             = sig_ts,
+                    market         = "OIL",
+                    direction      = dirn,
+                    score          = sc,
+                    confidence     = conf,
+                    theme          = theme,
+                    price_at_signal = price_now,
+                    text_preview   = text_body,
+                ),
+            )
 
-        alert_text = (
-            f"⚡ *Trump posted*\n\n"
-            f"_{p['text'][:400]}_\n\n"
-            f"{score_emoji(sc)} *{sc:+d} {dir_arrow} {dir_label}* {conf_flag}"
-            f"{kw_line}"
-            f"{price_line}"
-            f"{sigs_line}"
-            + (f"\n\n_{reason}_" if reason else "")
-        )
+        # ── Send alert ────────────────────────────────────────────────────────
+        if all_markets:
+            # Multi-market alert
+            primary = meta_block.get("primary_market", "OIL")
+            consist = meta_block.get("cross_market_consistency", "")
+            ambig   = meta_block.get("ambiguity_flag", False)
+            theme   = meta_block.get("post_theme", "")
+
+            # Header: post + OIL signal (fastest to read)
+            dir_arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "—")
+            conf_flag = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(conf, "")
+            kw_line   = f"\n_Keyword: `{kw_score:+d}`_" if kw_score != sc else ""
+            price_line = f"  💵 `${price_now:.2f}`" if price_now else ""
+
+            header = (
+                f"⚡ *Trump posted*\n\n"
+                f"_{text_body[:300]}_\n\n"
+                f"🛢 Oil: {score_emoji(sc)} `{sc:+d} {dir_arrow}` {conf_flag}{price_line}"
+                f"{kw_line}"
+                + (f"\n_{reason}_" if reason else "")
+            )
+
+            multi_body = format_multi_market_alert(all_markets, meta_block, prices_at_alert)
+            alert_text = header + "\n\n" + multi_body
+        else:
+            # Fallback: oil-only (same as before)
+            dir_arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "—")
+            dir_label = "BULL" if sc > 0 else ("BEAR" if sc < 0 else "FLAT")
+            conf_flag = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(conf, "")
+            kw_line   = f"\n_Keyword score: `{kw_score:+d}`_" if kw_score != sc else ""
+            price_line = f"\n💵 WTI: `${price_now:.2f}`" if price_now else ""
+            alert_text = (
+                f"⚡ *Trump posted*\n\n"
+                f"_{text_body[:400]}_\n\n"
+                f"{score_emoji(sc)} *{sc:+d} {dir_arrow} {dir_label}* {conf_flag}"
+                f"{kw_line}"
+                f"{price_line}"
+                + (f"\n\n_{reason}_" if reason else "")
+            )
 
         for uid in ALLOWED_USER_IDS:
             try:
@@ -1235,16 +1467,15 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             except Exception:
                 log.exception("Webhook alert send failed for uid %s", uid)
 
-        # Save to dashboard
-        sig_id   = f"sig_{p.get('date', '')}_{abs(hash(p.get('text','')))}"
-        sig_list = key_sigs or (list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", [])))
+        # ── Save to dashboard (oil signal + multi-market markets block) ───────
+        sig_list = (list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", [])))
         analogue = analogue_signal(p) if abs(sc) >= 2 else {}
         save_signal_to_dashboard(
             signal_id      = sig_id,
             ts             = datetime.now(timezone.utc).isoformat(),
             score          = sc,
-            direction      = direction,
-            text           = p.get("text", ""),
+            direction      = dirn,
+            text           = text_body,
             signals        = sig_list,
             signal_type    = "trump_post",
             url            = p.get("url", ""),
@@ -1253,6 +1484,11 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             avg1h          = analogue.get("avg_1h"),
             est24h         = analogue.get("est_24h"),
             hit_rate_1h    = analogue.get("hit_rate_1h"),
+            markets        = all_markets or None,
+            prices_at_alert= {k: v for k, v in prices_at_alert.items() if v is not None} or None,
+            post_theme     = meta_block.get("post_theme"),
+            primary_market = meta_block.get("primary_market"),
+            cross_market_consistency = meta_block.get("cross_market_consistency"),
         )
 
         if price_now and sc != 0:
@@ -1261,8 +1497,8 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
                 direction      = "LONG" if sc > 0 else "SHORT",
                 score          = sc,
                 price_at_alert = price_now,
-                post_text      = p.get("text", ""),
-                extra          = {"signals": sig_list, "dashboard_id": sig_id},
+                post_text      = text_body,
+                extra          = {"signals": sig_list, "dashboard_id": sig_id, "markets": list(all_markets.keys())},
             )
             _schedule_follow_ups(ctx.job_queue, local_sig_id, price_now)
 
@@ -1327,6 +1563,15 @@ async def main_async():
     await ptb_app.updater.start_polling(drop_pending_updates=True)
     log.info("Migas Oil Bot started")
 
+    # Start Truth Social Playwright poller (primary ingest — 3-5s latency, $0 cost)
+    # Replaces Apify ($900/mo) and broken WebSocket stream
+    from truthsocial_poller import run_truthsocial_poller
+    ts_poller_task = asyncio.create_task(
+        run_truthsocial_poller(ptb_app),
+        name="truthsocial_poller",
+    )
+    log.info("Truth Social Playwright poller started")
+
     # Keep running until interrupted — webhook tasks fire via asyncio.create_task()
     stop_event = asyncio.Event()
     try:
@@ -1335,6 +1580,11 @@ async def main_async():
         pass
     finally:
         log.info("Shutting down…")
+        ts_poller_task.cancel()
+        try:
+            await ts_poller_task
+        except asyncio.CancelledError:
+            pass
         await ptb_app.updater.stop()
         await ptb_app.stop()
         await ptb_app.shutdown()
