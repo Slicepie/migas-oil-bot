@@ -5,6 +5,7 @@ REPO="https://github.com/Slicepie/migas-oil-bot.git"
 BRANCH="${GIT_BRANCH:-main}"
 
 echo "[startup] Pulling latest code from $REPO ($BRANCH)..."
+rm -rf /tmp/repo
 git clone --depth=1 --branch "$BRANCH" "$REPO" /tmp/repo
 cp /tmp/repo/telegram/bot.py                /app/bot.py
 cp /tmp/repo/telegram/news.py               /app/news.py
