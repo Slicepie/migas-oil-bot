@@ -22,8 +22,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxshmfence1 \
     libx11-xcb1 \
     libxcb1 \
+    libxfixes3 \
+    libxext6 \
+    libx11-6 \
+    libxi6 \
+    libxtst6 \
+    libglib2.0-0 \
+    libdbus-1-3 \
     fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
+
+# Install all Playwright system deps automatically
+RUN playwright install-deps chromium
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
