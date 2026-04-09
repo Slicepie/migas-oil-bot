@@ -1563,14 +1563,14 @@ async def main_async():
     await ptb_app.updater.start_polling(drop_pending_updates=True)
     log.info("Migas Oil Bot started")
 
-    # Start Truth Social streaming (primary ingest — 1-3s latency vs Apify 60s)
-    # Runs as a background task; Apify webhook stays active as fallback
-    from truthsocial_stream import run_truthsocial_stream
-    ts_stream_task = asyncio.create_task(
-        run_truthsocial_stream(ptb_app),
-        name="truthsocial_stream",
+    # Start Truth Social Playwright poller (primary ingest — 3-5s latency, $0 cost)
+    # Replaces Apify ($900/mo) and broken WebSocket stream
+    from truthsocial_poller import run_truthsocial_poller
+    ts_poller_task = asyncio.create_task(
+        run_truthsocial_poller(ptb_app),
+        name="truthsocial_poller",
     )
-    log.info("Truth Social stream task started")
+    log.info("Truth Social Playwright poller started")
 
     # Keep running until interrupted — webhook tasks fire via asyncio.create_task()
     stop_event = asyncio.Event()
@@ -1580,9 +1580,9 @@ async def main_async():
         pass
     finally:
         log.info("Shutting down…")
-        ts_stream_task.cancel()
+        ts_poller_task.cancel()
         try:
-            await ts_stream_task
+            await ts_poller_task
         except asyncio.CancelledError:
             pass
         await ptb_app.updater.stop()
