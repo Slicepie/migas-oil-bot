@@ -12,7 +12,6 @@ cp /tmp/repo/telegram/news.py               /app/news.py
 cp /tmp/repo/telegram/tracker.py            /app/tracker.py
 cp /tmp/repo/telegram/llm_score.py           /app/llm_score.py
 cp /tmp/repo/telegram/truthsocial_poller.py  /app/truthsocial_poller.py
-cp /tmp/repo/telegram/truthsocial_stream.py  /app/truthsocial_stream.py
 rm -rf /tmp/repo
 
 echo "[startup] Code updated. Starting bot..."
