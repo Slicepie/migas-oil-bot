@@ -1074,6 +1074,47 @@ async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
             log.exception("Daily briefing failed for %s", uid)
 
 
+async def _volume_direction_check(context: ContextTypes.DEFAULT_TYPE):
+    """Called 5 min after a volume spike to resolve direction from price move."""
+    try:
+        data        = context.job.data
+        entry_price = data["entry_price"]
+        ratio       = data["ratio"]
+        insider     = data["insider_flag"]
+        signal_id   = data["signal_id"]
+
+        now_price = _current_wti()
+        if not now_price:
+            log.warning("Volume direction check: could not fetch price")
+            return
+
+        move_pct  = ((now_price - entry_price) / entry_price) * 100
+        direction = "BULLISH" if move_pct > 0 else "BEARISH" if move_pct < 0 else "FLAT"
+        arrow     = "📈" if move_pct > 0 else "📉" if move_pct < 0 else "➡️"
+
+        insider_label = "\n🚨 *INSIDER FLAG* — volume moved before any Trump post" if insider else ""
+        msg = (
+            f"⚡ *Volume Spike — Direction Resolved* {arrow}\n\n"
+            f"Spike: `{ratio}x` baseline\n"
+            f"Entry: `${entry_price:.2f}`\n"
+            f"Now:   `${now_price:.2f}`\n"
+            f"Move:  `{move_pct:+.2f}%` → *{direction}*"
+            f"{insider_label}"
+        )
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            except Exception:
+                log.exception("Failed to send volume direction to %s", uid)
+
+        # Update signal log with resolved direction
+        if signal_id:
+            follow_up(signal_id, "5m_direction", now_price)
+
+    except Exception:
+        log.exception("Volume direction check failed")
+
+
 async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
     """Check CL=F 5-min volume for unusual spikes.
 
@@ -1116,13 +1157,14 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
         notional_m   = (current_vol * current_px * 1000) / 1_000_000
         post_age_min = _last_trump_post_age_minutes()
 
-        # Trump post context
-        if post_age_min < 60:
-            trump_ctx = f"⚠️ Trump posted *{post_age_min:.0f} min ago* — spike may be post-driven"
-        elif post_age_min < 180:
-            trump_ctx = f"⏱ Last Trump post: {post_age_min:.0f} min ago — monitor for follow-up"
+        # Trump post context — 15 min = insider trading threshold
+        insider_flag = post_age_min > 15
+        if post_age_min <= 15:
+            trump_ctx = f"⚠️ Trump posted *{post_age_min:.0f} min ago* — spike likely post-driven"
+        elif post_age_min <= 60:
+            trump_ctx = f"⏱ Last Trump post: {post_age_min:.0f} min ago — no recent post"
         else:
-            trump_ctx = f"🔴 No Trump post in last 3h — *possible insider/institutional flow*"
+            trump_ctx = f"🔴 No Trump post in {post_age_min:.0f} min — *possible insider/institutional flow*"
 
         signal_text = (
             f"Volume spike {ratio:.1f}x baseline. {current_vol:,.0f} contracts "
@@ -1131,10 +1173,10 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
 
         signal_id = log_signal(
             signal_type    = "volume_spike",
-            direction      = "LONG",
+            direction      = "NEUTRAL",
             score          = 0,
             price_at_alert = current_px,
-            extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0), "post_age_min": round(post_age_min)},
+            extra          = {"ratio": round(ratio, 2), "volume": current_vol, "notional_m": round(notional_m, 0), "post_age_min": round(post_age_min), "insider_flag": insider_flag},
         )
         _schedule_follow_ups(context.job_queue, signal_id, current_px)
 
@@ -1152,6 +1194,7 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
         log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional, Trump post %.0f min ago",
                  ratio, current_vol, avg_vol, notional_m, post_age_min)
 
+        insider_label = "\n🚨 *INSIDER FLAG* — no Trump post before spike" if insider_flag else ""
         msg = (
             f"⚡ *Volume Spike — CL=F*\n\n"
             f"Volume: `{current_vol:,.0f}` contracts\n"
@@ -1160,12 +1203,26 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
             f"Notional: `~${notional_m:.0f}M`\n"
             f"Price: `${current_px:.2f}`\n\n"
             f"{trump_ctx}"
+            f"{insider_label}\n\n"
+            f"⏳ _Direction resolves in 5 min…_"
         )
         for uid in ALLOWED_USER_IDS:
             try:
                 await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
             except Exception:
                 log.exception("Failed to send volume alert to %s", uid)
+
+        # Schedule 5-min direction check
+        context.job_queue.run_once(
+            _volume_direction_check,
+            when=300,
+            data={
+                "entry_price": current_px,
+                "ratio": round(ratio, 2),
+                "insider_flag": insider_flag,
+                "signal_id": signal_id,
+            },
+        )
 
     except Exception:
         log.exception("Volume spike check failed")
@@ -1570,7 +1627,15 @@ async def main_async():
         run_truthsocial_poller(ptb_app),
         name="truthsocial_poller",
     )
-    log.info("Truth Social Playwright poller started")
+    log.info("Truth Social poller started")
+
+    # Start Hormuz vessel congestion monitor (aisstream.io WebSocket)
+    from hormuz_monitor import run_hormuz_monitor
+    hormuz_task = asyncio.create_task(
+        run_hormuz_monitor(ptb_app),
+        name="hormuz_monitor",
+    )
+    log.info("Hormuz vessel monitor started")
 
     # Keep running until interrupted — webhook tasks fire via asyncio.create_task()
     stop_event = asyncio.Event()
@@ -1581,8 +1646,13 @@ async def main_async():
     finally:
         log.info("Shutting down…")
         ts_poller_task.cancel()
+        hormuz_task.cancel()
         try:
             await ts_poller_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await hormuz_task
         except asyncio.CancelledError:
             pass
         await ptb_app.updater.stop()
