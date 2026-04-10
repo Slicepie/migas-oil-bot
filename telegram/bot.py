@@ -56,6 +56,9 @@ AUTO_FORECAST_COOLDOWN_MIN   = 30   # minutes between auto-forecasts (avoid spam
 AUTO_FORECAST_PRED_LEN       = 5    # days — shorter forecasts are more accurate for events
 AUTO_FORECAST_THEMES         = {"IRAN_MILITARY", "IRAN_DIPLOMATIC", "HORMUZ", "TARIFF_RELIEF"}
 
+ROLLING_FORECAST_INTERVAL_H  = 12   # hours between rolling forecast updates
+ROLLING_FORECAST_PRED_LEN    = 16   # always forecast 16 days ahead
+
 WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "changeme")
 WEBHOOK_PORT    = int(os.environ.get("WEBHOOK_PORT", "8080"))
 APIFY_API_TOKEN = os.environ.get("APIFY_API_TOKEN", "")
@@ -1077,6 +1080,69 @@ async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
             log.exception("Daily briefing failed for %s", uid)
 
 
+async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
+    """Run a rolling 16-day WTI forecast every 12 hours.
+
+    - Fetches fresh price data (actuals anchor the model)
+    - Runs Migas-1.5 with bull/bear scenarios
+    - Saves to dashboard as type="rolling" (originals preserved for tracking)
+    - Sends update to Telegram
+    """
+    log.info("Rolling forecast: starting 12h update…")
+    try:
+        price_data, current_price = fetch_prices("wti")
+        summary, sources          = build_live_summary(current_price, "wti")
+        net_label                 = sources.get("net_label", "")
+        net_score                 = sources.get("net_score", 0)
+        direction                 = "BULLISH" if net_score > 0 else "BEARISH" if net_score < 0 else "NEUTRAL"
+
+        output = get_forecast(
+            price_data, summary,
+            pred_len       = ROLLING_FORECAST_PRED_LEN,
+            n_summaries    = 5,
+            counterfactual = True,
+        )
+        forecast = output["forecast"]
+
+        save_forecast_to_dashboard(
+            instrument    = "wti",
+            current_price = current_price,
+            output        = output,
+            summary       = summary,
+            score         = net_score,
+            direction     = direction,
+            trigger_post  = "rolling_12h",
+            signals       = ["rolling_forecast"],
+            pred_len      = ROLLING_FORECAST_PRED_LEN,
+        )
+
+        forecast_text = format_forecast(forecast, current_price, "wti")
+        scenarios     = format_scenarios(output, current_price)
+
+        msg = (
+            f"🔄 *Rolling Forecast Update*\n\n"
+            f"{forecast_text}"
+            f"{scenarios}\n\n"
+            f"📰 {net_label}\n"
+            f"_Next update in 12h_"
+        )
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            except Exception:
+                log.exception("Failed to send rolling forecast to %s", uid)
+
+        log.info("Rolling forecast: done — %d-day forecast from $%.2f", ROLLING_FORECAST_PRED_LEN, current_price)
+
+    except Exception:
+        log.exception("Rolling forecast failed")
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text="🔄 Rolling forecast failed — will retry in 12h", parse_mode="Markdown")
+            except Exception:
+                pass
+
+
 async def _volume_direction_check(context: ContextTypes.DEFAULT_TYPE):
     """Called 5 min after a volume spike to resolve direction from price move."""
     try:
@@ -1612,10 +1678,11 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
 
-    ptb_app.job_queue.run_repeating(check_price_alerts, interval=300,    first=15)
-    ptb_app.job_queue.run_repeating(check_volume_spike, interval=300,    first=30)
-    ptb_app.job_queue.run_repeating(refresh_post_cache, interval=6*3600, first=10)
-    ptb_app.job_queue.run_repeating(check_trump_posts,  interval=600,    first=60)
+    ptb_app.job_queue.run_repeating(check_price_alerts,  interval=300,    first=15)
+    ptb_app.job_queue.run_repeating(check_volume_spike,  interval=300,    first=30)
+    ptb_app.job_queue.run_repeating(refresh_post_cache,  interval=6*3600, first=10)
+    ptb_app.job_queue.run_repeating(check_trump_posts,   interval=600,    first=60)
+    ptb_app.job_queue.run_repeating(rolling_forecast,    interval=ROLLING_FORECAST_INTERVAL_H * 3600, first=120)
 
     # Daily morning briefing — 8:30am ET = 12:30 UTC
     import pytz
