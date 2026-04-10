@@ -54,6 +54,7 @@ ALLOWED_USER_IDS = {1038492789}   # @slicepie5
 AUTO_FORECAST_MIN_SCORE      = 3    # |score| threshold to trigger auto-forecast
 AUTO_FORECAST_COOLDOWN_MIN   = 30   # minutes between auto-forecasts (avoid spam)
 AUTO_FORECAST_PRED_LEN       = 5    # days — shorter forecasts are more accurate for events
+AUTO_FORECAST_THEMES         = {"IRAN_MILITARY", "IRAN_DIPLOMATIC", "HORMUZ", "TARIFF_RELIEF"}
 
 WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "changeme")
 WEBHOOK_PORT    = int(os.environ.get("WEBHOOK_PORT", "8080"))
@@ -1010,15 +1011,17 @@ async def check_trump_posts(context: ContextTypes.DEFAULT_TYPE):
             hit_rate_1h    = analogue.get("hit_rate_1h"),
         )
 
-    # Auto-forecast if the strongest new post clears the threshold and cooldown has passed
-    top = max(posts, key=lambda p: abs(p["score"]))
-    if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
-        last = context.bot_data.get("last_auto_forecast")
-        now  = datetime.now(timezone.utc)
-        if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
-            context.bot_data["last_auto_forecast"] = now
-            log.info("Auto-forecast triggered by post (score %+d): %s", top["score"], top["text"][:80])
-            await trigger_auto_forecast(context, top)
+    # Auto-forecast if the strongest new post clears the threshold, theme filter, and cooldown
+    forecast_candidates = [p for p in posts if p.get("theme", "UNRELATED") in AUTO_FORECAST_THEMES]
+    if forecast_candidates:
+        top = max(forecast_candidates, key=lambda p: abs(p["score"]))
+        if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
+            last = context.bot_data.get("last_auto_forecast")
+            now  = datetime.now(timezone.utc)
+            if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
+                context.bot_data["last_auto_forecast"] = now
+                log.info("Auto-forecast triggered by post (score %+d, theme %s): %s", top["score"], top.get("theme"), top["text"][:80])
+                await trigger_auto_forecast(context, top)
 
 
 async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
@@ -1110,6 +1113,22 @@ async def _volume_direction_check(context: ContextTypes.DEFAULT_TYPE):
         # Update signal log with resolved direction
         if signal_id:
             follow_up(signal_id, "5m_direction", now_price)
+
+        # Trigger auto-forecast if direction resolved (not FLAT)
+        if direction != "FLAT" and abs(move_pct) >= 0.1:
+            insider_ctx = " (insider flag — no Trump post)" if insider else ""
+            fake_post = {
+                "score": 4 if move_pct > 0 else -4,
+                "signals": [f"volume_spike_{ratio}x{insider_ctx}"],
+                "text": f"Volume spike {ratio}x baseline, price moved {move_pct:+.2f}% in 5 min.{insider_ctx}",
+                "direction": direction,
+            }
+            last = context.bot_data.get("last_auto_forecast")
+            now = datetime.now(timezone.utc)
+            if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
+                context.bot_data["last_auto_forecast"] = now
+                log.info("Auto-forecast triggered by volume spike (%sx, %+.2f%%)", ratio, move_pct)
+                await trigger_auto_forecast(context, fake_post)
 
     except Exception:
         log.exception("Volume direction check failed")
@@ -1559,14 +1578,16 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             )
             _schedule_follow_ups(ctx.job_queue, local_sig_id, price_now)
 
-    # Auto-forecast — use highest-scoring post (by LLM score)
-    top = max(new_posts, key=lambda p: abs(p["score"]))
-    if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
-        last = ptb_app.bot_data.get("last_auto_forecast")
-        now  = datetime.now(timezone.utc)
-        if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
-            ptb_app.bot_data["last_auto_forecast"] = now
-            await trigger_auto_forecast(ctx, top)
+    # Auto-forecast — use highest-scoring post from approved themes only
+    forecast_candidates = [p for p in new_posts if p.get("theme", "UNRELATED") in AUTO_FORECAST_THEMES]
+    if forecast_candidates:
+        top = max(forecast_candidates, key=lambda p: abs(p["score"]))
+        if abs(top["score"]) >= AUTO_FORECAST_MIN_SCORE:
+            last = ptb_app.bot_data.get("last_auto_forecast")
+            now  = datetime.now(timezone.utc)
+            if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
+                ptb_app.bot_data["last_auto_forecast"] = now
+                await trigger_auto_forecast(ctx, top)
 
 
 # ---------------------------------------------------------------------------
