@@ -1592,6 +1592,14 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
             )
 
         # ── Send alert ────────────────────────────────────────────────────────
+        if not all_markets and kw_score != 0:
+            # LLM returned nothing — fallback to keyword-only alert
+            log.warning("LLM returned empty for post (kw_score=%d), using keyword fallback", kw_score)
+            all_markets = {"OIL": {"score": kw_score, "direction": "BULLISH" if kw_score > 0 else "BEARISH", "confidence": "MEDIUM", "rationale": ""}}
+            sc   = kw_score
+            dirn = "BULLISH" if kw_score > 0 else "BEARISH"
+            conf = "MEDIUM"
+
         if all_markets:
             # Multi-market alert
             primary = meta_block.get("primary_market", "OIL")
