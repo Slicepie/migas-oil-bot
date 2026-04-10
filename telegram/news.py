@@ -435,19 +435,7 @@ SIGNALS = [
 # Scoring engine
 # ---------------------------------------------------------------------------
 
-def score_post(text: str) -> tuple[int, list[str]]:
-    """Score a post for oil price impact.
-
-    Returns:
-        score: integer from -5 to +5
-        matched_signals: list of signal labels that matched
-
-    Returns (0, []) immediately if the post is not oil-market relevant.
-    """
-    # ── Step 1: Topic relevance gate ─────────────────────────────────────────
-    # Post must be about one of these topics to be scored at all.
-    # This filters out endorsements, rally speeches, unrelated political posts.
-    OIL_TOPICS = [
+OIL_TOPICS = [
         "iran", "iranian", "tehran", "hormuz", "strait of hormuz",
         "russia", "russian", "ukraine", "ukrainian", "moscow",
         "opec", "saudi", "aramco", "riyadh",
@@ -466,12 +454,30 @@ def score_post(text: str) -> tuple[int, list[str]]:
         "israel", "hamas", "hezbollah", "gaza",
         "strait", "blockade", "waterway", "waterways",
         "negotiate", "negotiation", "negotiations",
-    ]
+]
+
+
+def is_oil_topic(text: str) -> bool:
+    """Return True if the post text matches any oil-relevant topic keyword."""
     text_lower = text.lower()
-    if not any(topic in text_lower for topic in OIL_TOPICS):
+    return any(topic in text_lower for topic in OIL_TOPICS)
+
+
+def score_post(text: str) -> tuple[int, list[str]]:
+    """Score a post for oil price impact.
+
+    Returns:
+        score: integer from -5 to +5
+        matched_signals: list of signal labels that matched
+
+    Returns (0, []) immediately if the post is not oil-market relevant.
+    """
+    if not is_oil_topic(text):
         return 0, []
 
-    # ── Step 2: Direction scoring ─────────────────────────────────────────────
+    text_lower = text.lower()
+
+    # ── Direction scoring ─────────────────────────────────────────────────────
     total_score = 0
     matched     = []
 

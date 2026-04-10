@@ -31,6 +31,7 @@ from news import (
     build_live_summary, build_live_summary_override, get_relevant_trump_posts, refresh_cache,
     score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
     analogue_signal, format_analogue_signal, net_signal_text,
+    is_oil_topic,
 )
 from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
 from llm_score import llm_score_post, llm_score_multi_market, format_llm_followup, format_multi_market_alert, MARKET_TICKERS, THEME_EXPECTATIONS
@@ -68,6 +69,9 @@ SIGNAL_WEBHOOK_URLS: list[str] = [
     u.strip() for u in os.environ.get("SIGNAL_WEBHOOK_URLS", "").split(",") if u.strip()
 ]
 SIGNAL_WEBHOOK_SECRET = os.environ.get("SIGNAL_WEBHOOK_SECRET", "")
+
+# Discord webhook — public channel updates
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -1437,11 +1441,37 @@ async def process_webhook_posts(ptb_app: Application, raw_posts: list) -> None:
 async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) -> None:
     existing_texts = {p["text"] for p in __import__('news')._read_cache()}
     append_new_posts(raw_posts)
-    new_scored = _score_raw_posts(raw_posts)
-    new_posts  = [p for p in new_scored if p["text"] not in existing_texts]
 
-    log.info("Webhook: %d raw → %d scored → %d new oil-relevant",
-             len(raw_posts), len(new_scored), len(new_posts))
+    # Use topic gate (not keyword score) so the LLM can score posts
+    # that mention Iran/oil topics but use language keywords don't cover
+    new_scored = _score_raw_posts(raw_posts)
+    topic_relevant = [
+        p for p in raw_posts
+        if p.get("text", p.get("content", ""))
+        and is_oil_topic(p.get("text", p.get("content", "")))
+        and p.get("text", p.get("content", "")) not in existing_texts
+    ]
+    # Merge: keyword-scored posts + topic-only posts (deduplicated)
+    scored_texts = {p["text"] for p in new_scored}
+    new_posts = [p for p in new_scored if p["text"] not in existing_texts]
+    for p in topic_relevant:
+        text = p.get("text", p.get("content", ""))
+        if text not in scored_texts:
+            # Topic-relevant but keyword score=0 — pass to LLM with score=0
+            new_posts.append({
+                "text": text,
+                "score": 0,
+                "signals": [],
+                "confirmed": False,
+                "uso_pct_5m": None,
+                "uso_pct_1h": None,
+                "date": p.get("date", ""),
+                "time_eastern": p.get("time_eastern", ""),
+                "url": p.get("url", ""),
+            })
+
+    log.info("Webhook: %d raw → %d keyword-scored → %d topic-relevant → %d new to process",
+             len(raw_posts), len(new_scored), len(topic_relevant), len(new_posts))
 
     if not new_posts:
         return
