@@ -1630,12 +1630,16 @@ async def main_async():
     log.info("Truth Social poller started")
 
     # Start Hormuz vessel congestion monitor (aisstream.io WebSocket)
-    from hormuz_monitor import run_hormuz_monitor
-    hormuz_task = asyncio.create_task(
-        run_hormuz_monitor(ptb_app),
-        name="hormuz_monitor",
-    )
-    log.info("Hormuz vessel monitor started")
+    hormuz_task = None
+    try:
+        from hormuz_monitor import run_hormuz_monitor
+        hormuz_task = asyncio.create_task(
+            run_hormuz_monitor(ptb_app),
+            name="hormuz_monitor",
+        )
+        log.info("Hormuz vessel monitor started")
+    except ImportError:
+        log.warning("hormuz_monitor not available — skipping")
 
     # Keep running until interrupted — webhook tasks fire via asyncio.create_task()
     stop_event = asyncio.Event()
@@ -1646,15 +1650,17 @@ async def main_async():
     finally:
         log.info("Shutting down…")
         ts_poller_task.cancel()
-        hormuz_task.cancel()
+        if hormuz_task:
+            hormuz_task.cancel()
         try:
             await ts_poller_task
         except asyncio.CancelledError:
             pass
-        try:
-            await hormuz_task
-        except asyncio.CancelledError:
-            pass
+        if hormuz_task:
+            try:
+                await hormuz_task
+            except asyncio.CancelledError:
+                pass
         await ptb_app.updater.stop()
         await ptb_app.stop()
         await ptb_app.shutdown()
