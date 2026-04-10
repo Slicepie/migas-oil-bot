@@ -114,7 +114,10 @@ SIGNALS = [
       "open the f*ckin",               # censored variant
       "open that strait",
       "living in hell",                # ultimatum threat
-      "crazy bastards"], +5, "🔴 Hormuz/shipping threat"),
+      "crazy bastards",
+      # Apr 10 2026 patch — indirect Hormuz reference
+      "using international waterway",  # "extortion of the World by using International Waterways"
+      "using international waterways"], +5, "🔴 Hormuz/shipping threat"),
 
     # -------------------------------------------------------------------------
     # OIL / GAS INFRASTRUCTURE ATTACKS (strongly bullish)
@@ -192,7 +195,14 @@ SIGNALS = [
       "people of iran",                      # sympathetic framing = regime falling
       "iran will be free",
       "free iran",
-      "liberate iran"], +3, "🟠 Iran escalation"),
+      "liberate iran",
+      # Apr 10 2026 patches — coercion / intimidation language
+      "only reason they are alive",          # "only reason they are alive today is to negotiate"
+      "have no cards",                       # "Iranians don't seem to realize they have no cards"
+      "no cards",
+      "extortion of the world",              # "extortion of the World by using International Waterways"
+      "international waterway",
+      "international waterways"], +3, "🟠 Iran escalation"),
 
     # -------------------------------------------------------------------------
     # WAR / CONFLICT ESCALATION (bullish)
@@ -454,7 +464,8 @@ def score_post(text: str) -> tuple[int, list[str]]:
         "lng", "liquefied natural gas",
         "venezuela", "caracas",
         "israel", "hamas", "hezbollah", "gaza",
-        "strait", "blockade",
+        "strait", "blockade", "waterway", "waterways",
+        "negotiate", "negotiation", "negotiations",
     ]
     text_lower = text.lower()
     if not any(topic in text_lower for topic in OIL_TOPICS):
