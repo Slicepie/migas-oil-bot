@@ -1591,6 +1591,12 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
                 ),
             )
 
+        # ── Skip unrelated posts — don't spam Telegram ──────────────────────
+        llm_theme = meta_block.get("post_theme", "UNRELATED")
+        if sc == 0 and llm_theme == "UNRELATED":
+            log.info("Skipping UNRELATED post (score=0, theme=UNRELATED): %.80s", text_body)
+            continue
+
         # ── Send alert ────────────────────────────────────────────────────────
         if not all_markets and kw_score != 0:
             # LLM returned nothing — fallback to keyword-only alert
