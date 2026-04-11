@@ -77,7 +77,7 @@ post_theme must be one of:
   IRAN_MILITARY | IRAN_DIPLOMATIC | FED_ATTACK | TARIFF_ESCALATION | TARIFF_RELIEF
   CHINA_TRADE | CRYPTO_POLICY | ENERGY_DOMESTIC | HORMUZ | OPEC | RUSSIA_UKRAINE | UNRELATED
 
-primary_market = market with highest abs(score). ambiguity_flag = true when signals are CONTRADICTORY or OIL/SP500 score ≥ 3 in opposite directions.
+primary_market = market with highest abs(score). ambiguity_flag = true ONLY when the direction conflicts WITHIN a single market's logic (e.g. post is both bullish and bearish for the same asset). OIL bullish + SP500 bearish on a war/geopolitical post is CONSISTENT (war = supply risk + equity risk-off), NOT ambiguous. cross_market_consistency = CONSISTENT when all directions make logical sense together given the event type.
 
 ━━━ CONFIDENCE CRITERIA — direction is the only signal that matters ━━━
 HIGH:   Post explicitly names a specific action with a clear, direct market mechanism.
@@ -446,6 +446,11 @@ def format_multi_market_alert(markets: dict[str, dict], meta: dict, prices: dict
         label      = market_labels.get(m, m)
         star       = " ⭐" if m == primary else ""
         price_str  = f"  `${prices[m]:.2f}`" if prices.get(m) else ""
+        # Ensure move sign matches direction
+        if move and dirn == "BEARISH" and move > 0:
+            move = -move
+        elif move and dirn == "BULLISH" and move < 0:
+            move = -move
         move_str   = f"  ~{move:+.1f}%" if move else ""
 
         lines.append(f"{dir_emoji} *{label}*{star}  `{sc:+d}` {conf_emoji}{price_str}{move_str}")
