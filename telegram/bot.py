@@ -73,6 +73,12 @@ SIGNAL_WEBHOOK_SECRET = os.environ.get("SIGNAL_WEBHOOK_SECRET", "")
 # Discord webhook — public channel updates
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
+# Twitter/X — async posting after Telegram (never blocks signal speed)
+TWITTER_API_KEY          = os.environ.get("TWITTER_API_KEY", "")
+TWITTER_API_SECRET       = os.environ.get("TWITTER_API_SECRET", "")
+TWITTER_ACCESS_TOKEN     = os.environ.get("TWITTER_ACCESS_TOKEN", "")
+TWITTER_ACCESS_TOKEN_SECRET = os.environ.get("TWITTER_ACCESS_TOKEN_SECRET", "")
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
@@ -479,6 +485,145 @@ async def dispatch_signal_webhook(
             log.info("Signal webhook dispatched to %s", url)
         except Exception as exc:
             log.warning("Signal webhook failed for %s: %s", url, exc)
+
+
+# ---------------------------------------------------------------------------
+# Twitter/X posting — fire-and-forget, never blocks signal pipeline
+# ---------------------------------------------------------------------------
+
+def _get_twitter_client():
+    """Return authenticated tweepy Client + API (for media upload), or (None, None)."""
+    if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
+        return None, None
+    try:
+        import tweepy
+        # v2 client for posting tweets
+        client = tweepy.Client(
+            consumer_key=TWITTER_API_KEY,
+            consumer_secret=TWITTER_API_SECRET,
+            access_token=TWITTER_ACCESS_TOKEN,
+            access_token_secret=TWITTER_ACCESS_TOKEN_SECRET,
+        )
+        # v1.1 API for media upload
+        auth = tweepy.OAuth1UserHandler(
+            TWITTER_API_KEY, TWITTER_API_SECRET,
+            TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET,
+        )
+        api = tweepy.API(auth)
+        return client, api
+    except Exception as exc:
+        log.warning("Twitter client init failed: %s", exc)
+        return None, None
+
+
+async def tweet_signal(
+    score: int,
+    direction: str,
+    confidence: str,
+    theme: str,
+    price: float | None,
+    rationale: str = "",
+) -> None:
+    """Tweet a signal alert. Runs async after Telegram — never blocks."""
+    client, _ = _get_twitter_client()
+    if not client:
+        return
+    try:
+        dir_arrow = "▲" if score > 0 else ("▼" if score < 0 else "—")
+        conf_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
+        price_str = f"${price:.2f}" if price else ""
+        theme_tag = theme.replace("_", " ").title() if theme and theme != "UNRELATED" else ""
+
+        text = (
+            f"⚡ Oil Signal: {score:+d} {dir_arrow} {direction} {conf_map.get(confidence, '')}\n\n"
+            f"🛢 WTI: {price_str}\n"
+            + (f"📌 {theme_tag}\n" if theme_tag else "")
+            + (f"💡 {rationale[:180]}\n" if rationale else "")
+            + f"\n#WTI #CrudeOil #OilTrading #USOIL"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: client.create_tweet(text=text))
+        log.info("Tweet posted: signal %+d %s", score, direction)
+    except Exception as exc:
+        log.warning("Tweet failed: %s", exc)
+
+
+async def tweet_forecast(
+    forecast: list[float],
+    current_price: float,
+    pred_len: int,
+    chart_path: str | None = None,
+) -> None:
+    """Tweet a forecast update with optional chart image."""
+    client, api = _get_twitter_client()
+    if not client:
+        return
+    try:
+        end_price = forecast[-1]
+        change = end_price - current_price
+        pct = (change / current_price) * 100
+        direction = "📈" if change > 0 else "📉"
+
+        text = (
+            f"🛢 WTI {pred_len}-Day Forecast {direction}\n\n"
+            f"Current: ${current_price:.2f}\n"
+            f"Day {pred_len}: ${end_price:.2f} ({pct:+.1f}%)\n\n"
+            f"Powered by Migas-1.5\n"
+            f"usoil.ai\n\n"
+            f"#WTI #CrudeOil #OilForecast #AI"
+        )
+
+        media_ids = []
+        if chart_path and api:
+            try:
+                media = api.media_upload(filename=chart_path)
+                media_ids = [media.media_id]
+            except Exception as exc:
+                log.warning("Twitter media upload failed: %s", exc)
+
+        loop = asyncio.get_event_loop()
+        if media_ids:
+            await loop.run_in_executor(
+                None, lambda: client.create_tweet(text=text, media_ids=media_ids)
+            )
+        else:
+            await loop.run_in_executor(None, lambda: client.create_tweet(text=text))
+        log.info("Tweet posted: forecast %d-day", pred_len)
+    except Exception as exc:
+        log.warning("Tweet forecast failed: %s", exc)
+
+
+async def tweet_volume_spike(
+    ratio: float,
+    volume: float,
+    price: float,
+    direction: str = "NEUTRAL",
+    insider_flag: bool = False,
+) -> None:
+    """Tweet a volume spike alert."""
+    client, _ = _get_twitter_client()
+    if not client:
+        return
+    try:
+        insider = "🚨 No recent Trump post — possible insider flow" if insider_flag else ""
+        dir_str = f"Direction: {direction}" if direction != "NEUTRAL" else "Direction pending..."
+
+        text = (
+            f"⚡ Volume Spike Detected — CL=F\n\n"
+            f"📊 {ratio:.1f}x baseline\n"
+            f"💰 {volume:,.0f} contracts\n"
+            f"🛢 WTI: ${price:.2f}\n"
+            f"{dir_str}\n"
+            + (f"{insider}\n" if insider else "")
+            + f"\n#WTI #CrudeOil #VolumeSpike #OilTrading"
+        )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: client.create_tweet(text=text))
+        log.info("Tweet posted: volume spike %.1fx", ratio)
+    except Exception as exc:
+        log.warning("Tweet volume spike failed: %s", exc)
 
 
 def build_summary(current_price: float, instrument: str = "wti") -> str:
@@ -1149,6 +1294,12 @@ async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("Failed to send rolling forecast to %s", uid)
 
+        # Tweet forecast (async, after Telegram)
+        asyncio.ensure_future(tweet_forecast(
+            forecast=forecast, current_price=current_price,
+            pred_len=ROLLING_FORECAST_PRED_LEN,
+        ))
+
         log.info("Rolling forecast: done — %d-day forecast from $%.2f", ROLLING_FORECAST_PRED_LEN, current_price)
 
     except Exception:
@@ -1313,6 +1464,12 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
             except Exception:
                 log.exception("Failed to send volume alert to %s", uid)
+
+        # Tweet volume spike (async, after Telegram)
+        asyncio.ensure_future(tweet_volume_spike(
+            ratio=ratio, volume=current_vol, price=current_px,
+            insider_flag=insider_flag,
+        ))
 
         # Schedule 5-min direction check
         context.job_queue.run_once(
@@ -1665,6 +1822,14 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
                 )
             except Exception:
                 log.exception("Webhook alert send failed for uid %s", uid)
+
+        # ── Tweet signal (async, after Telegram — never blocks) ──────────────
+        if sc != 0:
+            asyncio.ensure_future(tweet_signal(
+                score=sc, direction=dirn, confidence=conf,
+                theme=meta_block.get("post_theme", ""),
+                price=price_now, rationale=reason,
+            ))
 
         # ── Save to dashboard (oil signal + multi-market markets block) ───────
         sig_list = (list(p.get("signals", {}).keys()) if isinstance(p.get("signals"), dict) else list(p.get("signals", [])))
