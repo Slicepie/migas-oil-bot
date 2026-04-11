@@ -1914,9 +1914,27 @@ async def main_async():
     ).timetz())
 
     # Build aiohttp webhook server
+    async def handle_test_post(request: web.Request) -> web.Response:
+        """POST /test_post/{secret} — inject a fake Trump post for testing."""
+        secret = request.match_info.get("secret", "")
+        if secret != WEBHOOK_SECRET:
+            return web.Response(status=401)
+        try:
+            body = await request.json()
+            posts = body.get("posts", [body] if "text" in body else [])
+            if not posts:
+                return web.Response(text="No posts", status=400)
+            ptb_app = request.app["ptb_app"]
+            asyncio.create_task(process_webhook_posts(ptb_app, posts))
+            return web.json_response({"ok": True, "count": len(posts)})
+        except Exception as exc:
+            log.exception("test_post handler error")
+            return web.Response(text=str(exc), status=500)
+
     aio_app = web.Application()
     aio_app["ptb_app"] = ptb_app   # webhook handler needs this to fire tasks
     aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
+    aio_app.router.add_post("/test_post/{secret}", handle_test_post)
     aio_app.router.add_get("/signal",            handle_signal_api)
 
     runner = web.AppRunner(aio_app)
