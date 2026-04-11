@@ -118,14 +118,27 @@ _volume_baseline_built: datetime | None = None
 
 
 def _build_volume_baseline() -> dict[int, float]:
-    """Build average 5-min CL=F volume by hour-of-day from last 14 days."""
+    """Build average 5-min CL=F volume by hour-of-day from last 14 days.
+
+    Returns {hour: avg_volume_per_5min_bar} so it can be compared directly
+    against a single 5-min bar's volume in check_volume_spike().
+    """
     import pandas as pd
     ticker = yf.Ticker("CL=F")
-    hist   = ticker.history(period=f"{VOLUME_BASELINE_DAYS}d", interval="1h")[["Volume"]]
+    # Use 5m data (yfinance max ~60 days for 5m) to get per-bar baseline
+    hist   = ticker.history(period=f"{VOLUME_BASELINE_DAYS}d", interval="5m")[["Volume"]]
+    if hist.empty:
+        # Fallback to 1h data divided by 12
+        hist = ticker.history(period=f"{VOLUME_BASELINE_DAYS}d", interval="1h")[["Volume"]]
+        hist.index = pd.to_datetime(hist.index)
+        hist["hour"] = hist.index.hour
+        baseline = {h: v / 12 for h, v in hist.groupby("hour")["Volume"].mean().to_dict().items()}
+        log.info("Volume baseline built (1h fallback /12): %d hours, avg=%.0f per 5m bar", len(baseline), sum(baseline.values()) / max(len(baseline), 1))
+        return baseline
     hist.index = pd.to_datetime(hist.index)
     hist["hour"] = hist.index.hour
     baseline = hist.groupby("hour")["Volume"].mean().to_dict()
-    log.info("Volume baseline built: %d hours, avg=%.0f", len(baseline), sum(baseline.values()) / max(len(baseline), 1))
+    log.info("Volume baseline built (5m): %d hours, avg=%.0f per 5m bar", len(baseline), sum(baseline.values()) / max(len(baseline), 1))
     return baseline
 
 
