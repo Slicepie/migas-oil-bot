@@ -569,8 +569,7 @@ async def tweet_forecast(
             f"🛢 WTI {pred_len}-Day Forecast {direction}\n\n"
             f"Current: ${current_price:.2f}\n"
             f"Day {pred_len}: ${end_price:.2f} ({pct:+.1f}%)\n\n"
-            f"Powered by Migas-1.5\n"
-            f"usoil.ai\n\n"
+            f"Powered by Migas-1.5\n\n"
             f"#WTI #CrudeOil #OilForecast #AI"
         )
 
