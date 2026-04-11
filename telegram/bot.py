@@ -73,6 +73,46 @@ SIGNAL_WEBHOOK_SECRET = os.environ.get("SIGNAL_WEBHOOK_SECRET", "")
 # Discord webhook — public channel updates
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
+# ---------------------------------------------------------------------------
+# SSE stream — in-memory push to connected traders (zero polling)
+# ---------------------------------------------------------------------------
+# Each connected client gets an asyncio.Queue. When a signal fires we push
+# to every queue instantly. Client disconnect removes the queue from the set.
+
+_sse_clients: dict[str, set[asyncio.Queue]] = {}  # market -> set of queues
+
+
+def sse_push(market: str, event: dict) -> None:
+    """Push an event to all SSE clients subscribed to a market. Non-blocking."""
+    clients = _sse_clients.get(market, set())
+    dead: list[asyncio.Queue] = []
+    for q in clients:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        clients.discard(q)
+    if clients:
+        log.info("SSE pushed to %d %s clients", len(clients), market)
+
+
+def sse_push_signal(all_markets: dict, meta: dict, prices: dict,
+                    signal_id: str, text: str, ts: str) -> None:
+    """Push a multi-market signal to all relevant SSE streams."""
+    for market, data in all_markets.items():
+        event = {
+            "signal_id":      signal_id,
+            "ts":             ts,
+            "market":         market,
+            "data":           data,
+            "price":          prices.get(market),
+            "post_theme":     meta.get("post_theme"),
+            "ambiguity_flag": meta.get("ambiguity_flag", False),
+            "text_preview":   text[:200],
+        }
+        sse_push(market, event)
+
 # Twitter/X — async posting after Telegram (never blocks signal speed)
 TWITTER_API_KEY          = os.environ.get("TWITTER_API_KEY", "")
 TWITTER_API_SECRET       = os.environ.get("TWITTER_API_SECRET", "")
@@ -1520,6 +1560,96 @@ async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["alerts"] = remaining
 
 # ---------------------------------------------------------------------------
+# SSE stream endpoint — GET /stream/{market}
+# ---------------------------------------------------------------------------
+
+VALID_STREAM_MARKETS = {"OIL", "CRYPTO", "SP500", "NATGAS"}
+
+async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
+    """
+    SSE endpoint for traders. Pushes signals instantly via in-memory queue.
+    No auth required (public beta). CORS open.
+
+    GET /stream/OIL?min_score=0&direction=&confidence=&post_theme=
+    """
+    market = request.match_info["market"].upper()
+    if market not in VALID_STREAM_MARKETS:
+        return web.json_response(
+            {"error": f"Unknown market. Valid: {', '.join(sorted(VALID_STREAM_MARKETS))}"},
+            status=400,
+        )
+
+    # Parse optional filters from query string
+    min_score    = int(request.query.get("min_score", "0") or "0")
+    filter_dir   = request.query.get("direction", "")
+    filter_conf  = request.query.get("confidence", "")
+    filter_theme = request.query.get("post_theme", "")
+
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type":                "text/event-stream",
+            "Cache-Control":               "no-cache, no-transform",
+            "Connection":                  "keep-alive",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin":  "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+        },
+    )
+    await resp.prepare(request)
+
+    # Send connected event
+    connected_data = json.dumps({
+        "market": market,
+        "filters": {
+            "min_score": min_score,
+            "direction": filter_dir or None,
+            "confidence": filter_conf or None,
+            "post_theme": filter_theme or None,
+        },
+    })
+    await resp.write(f"event: connected\ndata: {connected_data}\n\n".encode())
+
+    # Register this client
+    q: asyncio.Queue = asyncio.Queue(maxsize=50)
+    if market not in _sse_clients:
+        _sse_clients[market] = set()
+    _sse_clients[market].add(q)
+    log.info("SSE client connected for %s (total: %d)", market, len(_sse_clients[market]))
+
+    try:
+        while True:
+            # Wait for signal or send heartbeat every 25s
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=25.0)
+            except asyncio.TimeoutError:
+                await resp.write(b": heartbeat\n\n")
+                continue
+
+            # Apply filters
+            score = event.get("data", {}).get("score", 0)
+            if abs(score) < min_score:
+                continue
+            if filter_dir and event.get("data", {}).get("direction") != filter_dir:
+                continue
+            if filter_conf and event.get("data", {}).get("confidence") != filter_conf:
+                continue
+            if filter_theme and event.get("post_theme") != filter_theme:
+                continue
+
+            await resp.write(f"event: signal\ndata: {json.dumps(event)}\n\n".encode())
+
+    except (ConnectionResetError, ConnectionError, asyncio.CancelledError):
+        pass
+    finally:
+        _sse_clients.get(market, set()).discard(q)
+        log.info("SSE client disconnected from %s (remaining: %d)",
+                 market, len(_sse_clients.get(market, set())))
+
+    return resp
+
+
+# ---------------------------------------------------------------------------
 # Apify webhook server (aiohttp)
 # ---------------------------------------------------------------------------
 
@@ -1814,6 +1944,18 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
                 + (f"\n\n_{reason}_" if reason else "")
             )
 
+        # ── Push to SSE stream FIRST — traders before Telegram ────────────
+        sig_ts = datetime.now(timezone.utc).isoformat()
+        if all_markets:
+            sse_push_signal(
+                all_markets     = all_markets,
+                meta            = meta_block,
+                prices          = prices_at_alert,
+                signal_id       = sig_id,
+                text            = text_body,
+                ts              = sig_ts,
+            )
+
         for uid in ALLOWED_USER_IDS:
             try:
                 await ptb_app.bot.send_message(
@@ -1935,6 +2077,7 @@ async def main_async():
     aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
     aio_app.router.add_post("/test_post/{secret}", handle_test_post)
     aio_app.router.add_get("/signal",            handle_signal_api)
+    aio_app.router.add_get("/stream/{market}",   handle_sse_stream)
 
     runner = web.AppRunner(aio_app)
     await runner.setup()

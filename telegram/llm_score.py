@@ -98,6 +98,8 @@ Rule: fewer HIGH signals, better accuracy. Do not inflate confidence.
   • Endorsements of any candidate or official
   • Personal attacks on opponents, media, judges
   • Rally speeches, patriotism posts, "America is winning" boasts
+  • Victory laps / recaps of PAST military actions or deals already priced in
+  • Bragging about damage already done ("we destroyed their navy", "they are losing")
   • Vague forward-looking language with no named action ("very soon", "big announcement coming")
   • Domestic policy without named international trade/military component
   • Social commentary, religion, sports, entertainment
@@ -109,17 +111,28 @@ If no specific action is identifiable → ALL markets NEUTRAL 0.
 ━━━ DIRECTIONAL ANCHORS ━━━
 OIL (CL=F — WTI crude):
 
-  ★ HARD RULE — Iran posts are binary, no gradient ★
-  ANY post about Iran escalation, aggression, military action, threats, strikes,
-  Hormuz blockade, "maximum pressure", new sanctions on Iran, regime change rhetoric,
-  or war framing → BULLISH +5, HIGH confidence, est ~3.0%
+  ★ HARD RULE — Iran posts: 3 categories ★
 
-  ANY post about Iran peace, ceasefire, de-escalation, "talks going well",
-  nuclear deal progress, suspending strikes, Iran cooperation, or diplomatic resolution
-  → BEARISH -5, HIGH confidence, est ~3.0%
+  1) NEW escalation — a NEW threat, strike, or military action being announced or imminent:
+     "bombing Iran tonight", "just launched strikes", "preparing to attack",
+     "new sanctions on Iran effective Monday", "maximum pressure begins now"
+     → BULLISH +5, HIGH confidence, est ~3.0%
 
-  Do not split hairs on Iran. There is no "mild" Iran post — every Iran-related post
-  is either escalation (+5) or de-escalation (-5). This is the strongest signal we have.
+  2) De-escalation — peace, ceasefire, diplomacy, standing down:
+     "talks going well", "ceasefire signed", "suspending strikes", "Iran agreed to deal"
+     → BEARISH -5, HIGH confidence, est ~3.0%
+
+  3) Victory lap / recap — bragging about PAST actions already priced in:
+     "Iran is losing", "their navy is destroyed", "we obliterated their missiles",
+     "Iran has no cards", "we already won", describing completed military operations,
+     celebrating damage already done, media criticism framing ("fake news says Iran winning")
+     → NEUTRAL 0, LOW confidence
+     WHY: Markets already moved when the strikes happened. Recap posts contain
+     zero new information. Scoring these +5 creates false signals.
+
+  KEY DISTINCTION: Is the post announcing/threatening something NEW, or describing
+  something that ALREADY HAPPENED? Only new actions move markets.
+  When in doubt: if every fact in the post was already public → NEUTRAL.
 
   ★ HARD RULE — HORMUZ / Middle East shipping is binary ★
   Post about Strait of Hormuz, Houthis, Red Sea, Gulf of Aden, Bab el-Mandeb,
@@ -128,12 +141,15 @@ OIL (CL=F — WTI crude):
   maritime threats, shipping disruption in Middle East, Yemen (Houthi context),
   freedom of navigation, oil transit routes, or any threat to energy shipping:
 
-  Strait CLOSED / blockade / attack / threat / disruption / Houthis attacking ships
+  Strait CLOSED / blockade / attack / threat / NEW disruption / Houthis attacking ships
   → BULLISH +5, HIGH confidence, est ~3.0%  (supply chokepoint at risk)
 
   Strait OPEN / safe passage / shipping secured / Houthis defeated / maritime insurance /
   naval escort / trade route reopened / shipping protection guaranteed
   → BEARISH -5, HIGH confidence, est ~3.0%  (supply flows freely, risk premium drops)
+
+  Recap/victory lap about Hormuz/Houthis ALREADY cleared → NEUTRAL 0, LOW confidence
+  (same rule as Iran: if the action already happened and was priced in, no new signal)
 
   Theme = HORMUZ (not IRAN_MILITARY) when the post is primarily about shipping/strait/Houthis.
   Only use IRAN_MILITARY when Iran itself (government, military, nuclear) is the subject.
