@@ -1798,18 +1798,7 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
     _sse_ip_count[client_ip] = _sse_ip_count.get(client_ip, 0) + 1
     log.info("SSE client connected for %s from %s (total: %d)", market, client_ip, total_clients + 1)
 
-    # Notify you on Telegram when a trader connects
-    try:
-        ptb_app = request.app.get("ptb_app")
-        if ptb_app and total_clients == 0:  # first trader — always notify
-            for uid in ALLOWED_USER_IDS:
-                await ptb_app.bot.send_message(
-                    chat_id=uid,
-                    text=f"📡 Trader connected to `{market}` stream\n🌐 IP: `{client_ip}`\n👥 Total: {total_clients + 1}",
-                    parse_mode="Markdown",
-                )
-    except Exception:
-        pass  # never block the stream
+    # Connection tracked in logs + /stream/stats — no Telegram notification
 
     try:
         while True:
