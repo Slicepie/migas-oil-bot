@@ -857,8 +857,6 @@ async def tweet_signal(
             if consist:
                 lines.append(f"\n{consist_e} {consist}")
 
-        lines.append("\n🛢 OIL trader API access: www.usoil.ai")
-
         tweet_text = "\n".join(lines)
 
         # Twitter Blue/Premium allows up to 25,000 chars
