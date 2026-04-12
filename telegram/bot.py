@@ -1632,6 +1632,19 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
     _sse_ip_count[client_ip] = _sse_ip_count.get(client_ip, 0) + 1
     log.info("SSE client connected for %s from %s (total: %d)", market, client_ip, total_clients + 1)
 
+    # Notify you on Telegram when a trader connects
+    try:
+        ptb_app = request.app.get("ptb_app")
+        if ptb_app and total_clients == 0:  # first trader — always notify
+            for uid in ALLOWED_USER_IDS:
+                await ptb_app.bot.send_message(
+                    chat_id=uid,
+                    text=f"📡 Trader connected to `{market}` stream\n🌐 IP: `{client_ip}`\n👥 Total: {total_clients + 1}",
+                    parse_mode="Markdown",
+                )
+    except Exception:
+        pass  # never block the stream
+
     try:
         while True:
             # Wait for signal or send heartbeat every 25s
@@ -1665,6 +1678,26 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
         log.info("SSE client disconnected from %s [%s] (remaining: %d)", market, client_ip, remaining)
 
     return resp
+
+
+# ---------------------------------------------------------------------------
+# SSE stats endpoint — GET /stream/stats
+# ---------------------------------------------------------------------------
+
+async def handle_stream_stats(request: web.Request) -> web.Response:
+    """GET /stream/stats — live trader connection stats (public)."""
+    per_market = {m: len(clients) for m, clients in _sse_clients.items() if clients}
+    total = sum(per_market.values())
+    unique_ips = len(_sse_ip_count)
+    return web.json_response({
+        "total_connections": total,
+        "unique_ips":        unique_ips,
+        "per_market":        per_market,
+        "limits": {
+            "max_total": MAX_SSE_CLIENTS_TOTAL,
+            "max_per_ip": MAX_SSE_PER_IP,
+        },
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2095,6 +2128,7 @@ async def main_async():
     aio_app.router.add_post("/webhook/{secret}", handle_apify_webhook)
     aio_app.router.add_post("/test_post/{secret}", handle_test_post)
     aio_app.router.add_get("/signal",            handle_signal_api)
+    aio_app.router.add_get("/stream/stats",       handle_stream_stats)
     aio_app.router.add_get("/stream/{market}",   handle_sse_stream)
 
     runner = web.AppRunner(aio_app)
