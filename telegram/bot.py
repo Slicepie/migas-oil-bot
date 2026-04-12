@@ -857,6 +857,8 @@ async def tweet_signal(
             if consist:
                 lines.append(f"\n{consist_e} {consist}")
 
+        lines.append("\n🛢 OIL trader API access: www.usoil.ai")
+
         tweet_text = "\n".join(lines)
 
         # Twitter Blue/Premium allows up to 25,000 chars
@@ -1095,8 +1097,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/referral — your referral link & points\n"
         "/claim — claim points for social tasks\n"
         "/leaderboard — top 10 points\n\n"
-        "_60-day post-war history window_",
+        "_60-day post-war history window_\n\n"
+        "—\n"
+        "🌐 API & Subscription: [www.usoil.ai](https://www.usoil.ai)\n"
+        "💬 Help / Community: @Aiyieldai\n"
+        "🐦 X: [x.com/aiyieldai](https://x.com/aiyieldai)",
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
@@ -1886,11 +1893,15 @@ async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
             f"{forecast_text}"
             f"{scenarios}\n\n"
             f"📰 {net_label}\n"
-            f"_Next update in 12h_"
+            f"_Next update in 12h_\n\n"
+            f"—\n"
+            f"🌐 API & Subscription: [www.usoil.ai](https://www.usoil.ai)\n"
+            f"💬 Help / Community: @Aiyieldai\n"
+            f"🐦 X: [x.com/aiyieldai](https://x.com/aiyieldai)"
         )
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown", disable_web_page_preview=True,)
             except Exception:
                 log.exception("Failed to send rolling forecast to %s", uid)
 
@@ -2682,10 +2693,16 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
                 ts              = sig_ts,
             )
 
+        alert_text += (
+            "\n\n—\n"
+            "🛢 OIL trader API access: [www.usoil.ai](https://www.usoil.ai)"
+        )
+
         for uid in ALLOWED_USER_IDS:
             try:
                 await ptb_app.bot.send_message(
-                    chat_id=uid, text=alert_text, parse_mode="Markdown"
+                    chat_id=uid, text=alert_text, parse_mode="Markdown",
+                    disable_web_page_preview=True,
                 )
             except Exception:
                 log.exception("Webhook alert send failed for uid %s", uid)
