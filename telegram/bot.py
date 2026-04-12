@@ -671,33 +671,90 @@ def _get_twitter_client():
 
 
 async def tweet_signal(
+    text_body: str,
+    kw_score: int,
     score: int,
     direction: str,
     confidence: str,
-    theme: str,
-    price: float | None,
-    rationale: str = "",
+    rationale: str,
+    all_markets: dict,
+    meta: dict,
+    prices: dict,
 ) -> None:
-    """Tweet a signal alert. Runs async after Telegram — never blocks."""
+    """Tweet a full signal alert matching Telegram format. Never blocks."""
     client, _ = _get_twitter_client()
     if not client:
         return
     try:
-        dir_arrow = "▲" if score > 0 else ("▼" if score < 0 else "—")
         conf_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
-        price_str = f"${price:.2f}" if price else ""
-        theme_tag = theme.replace("_", " ").title() if theme and theme != "UNRELATED" else ""
+        dir_arrow = "▲" if score > 0 else ("▼" if score < 0 else "—")
+        conf_flag = conf_map.get(confidence, "")
+        price_now = prices.get("OIL")
+        price_str = f"  💵 ${price_now:.2f}" if price_now else ""
+        kw_line = f"\nKeyword: {kw_score:+d}" if kw_score != score else ""
+        theme = meta.get("post_theme", "")
 
-        text = (
-            f"⚡ Oil Signal: {score:+d} {dir_arrow} {direction} {conf_map.get(confidence, '')}\n\n"
-            f"🛢 WTI: {price_str}\n"
-            + (f"📌 {theme_tag}\n" if theme_tag else "")
-            + (f"💡 {rationale[:180]}\n" if rationale else "")
-            + f"\n#WTI #CrudeOil #OilTrading #USOIL"
-        )
+        # Header
+        lines = [
+            f"⚡️ Trump posted\n",
+            text_body[:280] + "\n",
+            f"🛢 Oil: {score_emoji(score)} {score:+d} {dir_arrow} {conf_flag}{price_str}"
+            + kw_line,
+        ]
+        if rationale:
+            lines.append(rationale[:200])
+
+        # Multi-market block
+        if all_markets and theme and theme != "UNRELATED":
+            lines.append(f"\n🌐 Multi-Market Signal — {theme}\n")
+
+            market_order = ["OIL", "CRYPTO", "SP500", "NATGAS"]
+            market_labels = {
+                "OIL": "🛢 Oil", "CRYPTO": "₿ BTC",
+                "SP500": "📊 S&P", "NATGAS": "🔥 NatGas",
+            }
+            primary = meta.get("primary_market", "OIL")
+
+            for m in market_order:
+                d = all_markets.get(m)
+                if not d:
+                    continue
+                m_sc = d.get("score", 0)
+                m_dir = d.get("direction", "NEUTRAL")
+                m_conf = d.get("confidence", "LOW")
+                m_move = d.get("est_move_pct")
+                if m_sc == 0 and m_dir == "NEUTRAL":
+                    continue
+
+                dir_e = "📈" if m_dir == "BULLISH" else ("📉" if m_dir == "BEARISH" else "⚪")
+                conf_e = conf_map.get(m_conf, "")
+                label = market_labels.get(m, m)
+                star = " ⭐️" if m == primary else ""
+                m_price = prices.get(m)
+                price_s = f"  ${m_price:.2f}" if m_price else ""
+                # Ensure move sign matches direction
+                if m_move and m_dir == "BEARISH" and m_move > 0:
+                    m_move = -m_move
+                elif m_move and m_dir == "BULLISH" and m_move < 0:
+                    m_move = -m_move
+                move_s = f"  ~{m_move:+.1f}%" if m_move else ""
+
+                lines.append(f"{dir_e} {label}{star}  {m_sc:+d} {conf_e}{price_s}{move_s}")
+
+            consist = meta.get("cross_market_consistency", "")
+            consist_e = {"CONSISTENT": "🟢", "SPLIT": "🟡", "CONTRADICTORY": "🔴"}.get(consist, "")
+            if consist:
+                lines.append(f"\n{consist_e} {consist}")
+
+        tweet_text = "\n".join(lines)
+
+        # Twitter Blue/Premium allows up to 25,000 chars
+        # Standard accounts limited to 280 — truncate post text if needed
+        if len(tweet_text) > 25000:
+            tweet_text = tweet_text[:24997] + "..."
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: client.create_tweet(text=text))
+        await loop.run_in_executor(None, lambda: client.create_tweet(text=tweet_text))
         log.info("Tweet posted: signal %+d %s", score, direction)
     except Exception as exc:
         log.warning("Tweet failed: %s", exc)
@@ -2121,9 +2178,13 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
         # ── Tweet signal (async, after Telegram — never blocks) ──────────────
         if sc != 0:
             asyncio.ensure_future(tweet_signal(
+                text_body=text_body,
+                kw_score=kw_score,
                 score=sc, direction=dirn, confidence=conf,
-                theme=meta_block.get("post_theme", ""),
-                price=price_now, rationale=reason,
+                rationale=reason,
+                all_markets=all_markets,
+                meta=meta_block,
+                prices=prices_at_alert,
             ))
 
         # ── Save to dashboard (oil signal + multi-market markets block) ───────
