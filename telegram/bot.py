@@ -184,8 +184,8 @@ def _generate_referral_code(username: str) -> str:
 
 
 def _resolve_username(user) -> str:
-    """Return telegram username if set, otherwise str(user.id)."""
-    return user.username if user.username else str(user.id)
+    """Return telegram username (lowercased) if set, otherwise str(user.id)."""
+    return user.username.lower() if user.username else str(user.id)
 
 
 def _award_points(username: str, points: int, event_type: str, meta: dict | None = None):
