@@ -52,7 +52,23 @@ RUNPOD_ENDPOINT  = "https://api.runpod.ai/v2/fxkby0bka43s1i/runsync"
 USOIL_AI_URL     = os.environ.get("USOIL_AI_URL", "")          # e.g. https://usoil-ai.vercel.app
 FORECAST_SECRET  = os.environ.get("FORECAST_SAVE_SECRET", "changeme")
 
-ALLOWED_USER_IDS = {1038492789}   # @slicepie5
+ADMIN_USER_IDS   = {1038492789}   # @slicepie5 — admin only commands (if any)
+ALLOWED_USER_IDS: set[int] = {1038492789}  # seeded with admin, grows on /start
+
+
+def _load_user_ids_from_redis():
+    """Load all registered user IDs from Redis into ALLOWED_USER_IDS on startup."""
+    try:
+        members = _redis_cmd("SMEMBERS", "bot:user_ids")
+        if members and members.get("result"):
+            for uid_str in members["result"]:
+                try:
+                    ALLOWED_USER_IDS.add(int(uid_str))
+                except (ValueError, TypeError):
+                    pass
+            log.info("Loaded %d user IDs from Redis", len(ALLOWED_USER_IDS))
+    except Exception as exc:
+        log.warning("Failed to load user IDs from Redis: %s", exc)
 
 AUTO_FORECAST_MIN_SCORE      = 3    # |score| threshold to trigger auto-forecast
 AUTO_FORECAST_COOLDOWN_MIN   = 30   # minutes between auto-forecasts (avoid spam)
@@ -1067,6 +1083,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = _resolve_username(user)
 
+    # Register user for signal broadcasts (in-memory + Redis for persistence)
+    ALLOWED_USER_IDS.add(user.id)
+    _redis_cmd("SADD", "bot:user_ids", str(user.id))
+
     # --- Points / referral registration (idempotent) -----------------------
     try:
         existing = _redis_cmd("HGET", _user_key(username), "tg_id")
@@ -1344,17 +1364,14 @@ async def run_forecast(instrument: str, update: Update):
         await msg.edit_text(f"❌ Error: {exc}")
 
 
-@restricted
 async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_forecast("wti", update)
 
 
-@restricted
 async def cmd_brent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_forecast("brent", update)
 
 
-@restricted
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /alert <price>\nExample: /alert 85.00")
@@ -1375,7 +1392,6 @@ async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Alert set for *${target:.2f}*", parse_mode="Markdown")
 
 
-@restricted
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts = [
         a for a in context.bot_data.get("alerts", [])
@@ -1391,7 +1407,6 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-@restricted
 async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show trader signal for the strongest Trump post in the last 48h.
     Shows a staleness warning if the post is older than 4 hours.
@@ -1438,7 +1453,6 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error: {exc}")
 
 
-@restricted
 async def cmd_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current prices for all tracked markets with source info."""
     msg = await update.message.reply_text("⏳ Fetching prices…")
@@ -1508,7 +1522,6 @@ async def cmd_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error: {exc}")
 
 
-@restricted
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the last 10 saved signals from the dashboard."""
     if not USOIL_AI_URL:
@@ -1578,14 +1591,12 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {exc}")
 
 
-@restricted
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show signal accuracy report."""
     text = format_accuracy_report()
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-@restricted
 async def cmd_cancelalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid    = update.effective_user.id
     before = len(context.bot_data.get("alerts", []))
@@ -2813,6 +2824,9 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 # ---------------------------------------------------------------------------
 
 async def main_async():
+    # Load registered users from Redis so broadcasts survive restarts
+    _load_user_ids_from_redis()
+
     # Build PTB app
     ptb_app = (
         Application.builder()
