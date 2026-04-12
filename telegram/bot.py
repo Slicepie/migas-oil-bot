@@ -1084,6 +1084,63 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @restricted
+async def cmd_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current prices for all tracked markets with source info."""
+    msg = await update.message.reply_text("⏳ Fetching prices…")
+    try:
+        from llm_score import MARKET_TICKERS
+
+        lines = ["📊 *Current Prices*\n"]
+        market_labels = {
+            "OIL": "🛢 WTI", "CRYPTO": "₿ BTC",
+            "SP500": "📊 S&P 500", "NATGAS": "🔥 NatGas",
+        }
+        cme_open = _is_cme_market_open()
+        lines.append(f"_CME: {'🟢 Open' if cme_open else '🔴 Closed'}_\n")
+
+        for market, ticker in MARKET_TICKERS.items():
+            label = market_labels.get(market, market)
+
+            # Try Yahoo first
+            yf_price = None
+            yf_stale = False
+            try:
+                hist = yf.Ticker(ticker).history(period="1d", interval="5m")[["Close"]]
+                if not hist.empty:
+                    yf_price = round(float(hist["Close"].iloc[-1]), 2)
+                    age_min = (datetime.now(timezone.utc) - hist.index[-1].to_pydatetime().astimezone(timezone.utc)).total_seconds() / 60
+                    yf_stale = age_min > 30
+            except Exception:
+                pass
+
+            # Try Hyperliquid for oil markets
+            hl_price = None
+            hl_sym = _HL_SYMBOLS.get(ticker)
+            if hl_sym:
+                hl_price = _fetch_hyperliquid_price(hl_sym)
+
+            # Pick the best price
+            final_price = fetch_price_with_fallback(ticker)
+            source = "Yahoo"
+            if yf_price and not yf_stale:
+                source = "Yahoo ✅"
+            elif hl_price and (yf_stale or not yf_price):
+                source = "Hyperliquid 🔄"
+            elif yf_price and yf_stale:
+                source = f"Yahoo ⚠️ stale"
+
+            price_str = f"`${final_price:,.2f}`" if final_price else "`—`"
+            hl_str = f"  HL: `${hl_price:,.2f}`" if hl_price else ""
+
+            lines.append(f"{label}: {price_str}  _({source})_{hl_str}")
+
+        await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        log.exception("Prices command error")
+        await msg.edit_text(f"❌ Error: {exc}")
+
+
+@restricted
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the last 10 saved signals from the dashboard."""
     if not USOIL_AI_URL:
@@ -2238,7 +2295,7 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("start",        cmd_start))
     ptb_app.add_handler(CommandHandler("forecast",     cmd_forecast))
     ptb_app.add_handler(CommandHandler("brent",        cmd_brent))
-    ptb_app.add_handler(CommandHandler("signal",       cmd_signal))
+    ptb_app.add_handler(CommandHandler("prices",       cmd_prices))
     ptb_app.add_handler(CommandHandler("signals",      cmd_signals))
     ptb_app.add_handler(CommandHandler("stats",        cmd_stats))
     ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
