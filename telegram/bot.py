@@ -1128,7 +1128,7 @@ async def cmd_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rank_data = _redis_cmd("ZREVRANK", "points:leaderboard", username)
         rank = (int(rank_data["result"]) + 1) if rank_data and rank_data.get("result") is not None else "?"
 
-        ref_link = f"https://t.me/usoil_ai_bot?start=REF_{ref_code}"
+        ref_link = f"https://t.me/oilapibot?start=REF_{ref_code}"
 
         await update.message.reply_text(
             f"🏆 *Your Referral Dashboard*\n\n"
