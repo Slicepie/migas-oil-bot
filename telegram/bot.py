@@ -18,6 +18,8 @@ import asyncio
 import json
 import logging
 import os
+import random
+import string
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -129,6 +131,76 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Upstash Redis REST helpers (shared with Next.js webapp)
+# ---------------------------------------------------------------------------
+
+UPSTASH_REDIS_REST_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+
+def _redis_cmd(*args) -> dict | None:
+    """Execute a single Redis command via the Upstash REST API.
+    Returns the parsed JSON response or None on failure."""
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        log.warning("Upstash Redis not configured — skipping command %s", args[0] if args else "?")
+        return None
+    try:
+        resp = requests.post(
+            UPSTASH_REDIS_REST_URL,
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            json=list(args),
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        log.error("Redis command %s failed: %s", args, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Points / referral constants
+# ---------------------------------------------------------------------------
+
+POINTS_FOLLOW_X        = 100
+POINTS_JOIN_TELEGRAM   = 100
+POINTS_JOIN_DISCORD    = 50
+POINTS_REFERRAL_SIGNUP = 250
+POINTS_REFERRAL_STANDARD = 2000
+POINTS_REFERRAL_PREMIUM  = 5000
+
+
+def _user_key(username: str) -> str:
+    return f"points:user:{username}"
+
+
+def _generate_referral_code(username: str) -> str:
+    """First 4 chars of username uppercased + 2 random digits, e.g. JAKE42."""
+    prefix = username[:4].upper().ljust(4, "X")
+    suffix = f"{random.randint(0, 99):02d}"
+    return prefix + suffix
+
+
+def _resolve_username(user) -> str:
+    """Return telegram username if set, otherwise str(user.id)."""
+    return user.username if user.username else str(user.id)
+
+
+def _award_points(username: str, points: int, event_type: str, meta: dict | None = None):
+    """Award points to a user: increment hash, update leaderboard, log event."""
+    _redis_cmd("HINCRBY", _user_key(username), "points", points)
+    _redis_cmd("ZINCRBY", "points:leaderboard", points, username)
+    event = {
+        "type": event_type,
+        "points": points,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if meta:
+        event.update(meta)
+    _redis_cmd("LPUSH", f"points:events:{username}", json.dumps(event))
+
 
 # ---------------------------------------------------------------------------
 # Auth decorator
@@ -961,8 +1033,54 @@ def format_scenarios(output: dict, current_price: float) -> str:
 # Command handlers
 # ---------------------------------------------------------------------------
 
-@restricted
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    username = _resolve_username(user)
+
+    # --- Points / referral registration (idempotent) -----------------------
+    try:
+        existing = _redis_cmd("HGET", _user_key(username), "tg_id")
+        is_new = existing is None or existing.get("result") is None
+
+        if is_new:
+            ref_code = _generate_referral_code(username)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            _redis_cmd(
+                "HSET", _user_key(username),
+                "tg_id", str(user.id),
+                "display_name", user.first_name or username,
+                "referral_code", ref_code,
+                "points", "0",
+                "created_at", now_iso,
+            )
+            # Reverse lookup: code -> username
+            _redis_cmd("HSET", f"points:ref:{ref_code}", "username", username)
+
+            # Auto-award Telegram join points
+            _award_points(username, POINTS_JOIN_TELEGRAM, "join_telegram")
+
+            # Handle referral deep link: /start REF_XXXX
+            if context.args and context.args[0].startswith("REF_"):
+                ref_payload = context.args[0][4:]  # strip "REF_"
+                referrer_lookup = _redis_cmd("HGET", f"points:ref:{ref_payload}", "username")
+                if referrer_lookup and referrer_lookup.get("result"):
+                    referrer = referrer_lookup["result"]
+                    if referrer != username:  # can't refer yourself
+                        _award_points(referrer, POINTS_REFERRAL_SIGNUP, "referral_signup", {"referred": username})
+                        # Track referral count
+                        _redis_cmd("HINCRBY", _user_key(referrer), "referral_count", 1)
+                        log.info("Referral: %s referred %s (+%d pts)", referrer, username, POINTS_REFERRAL_SIGNUP)
+
+            # Initialize on leaderboard
+            user_data = _redis_cmd("HGET", _user_key(username), "points")
+            pts = int(user_data["result"]) if user_data and user_data.get("result") else 0
+            _redis_cmd("ZADD", "points:leaderboard", pts, username)
+
+            log.info("New points user registered: %s (code=%s)", username, ref_code)
+    except Exception as exc:
+        log.error("Points registration error for %s: %s", username, exc)
+
+    # --- Original welcome message ------------------------------------------
     await update.message.reply_text(
         "🛢️ *Migas Oil Bot*\n\n"
         "Commands:\n"
@@ -973,10 +1091,173 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/brent — 16-day Brent forecast (Migas-1.5)\n"
         "/alert 85.00 — alert when WTI hits $85\n"
         "/alerts — list active alerts\n"
-        "/cancelalert — cancel all alerts\n\n"
+        "/cancelalert — cancel all alerts\n"
+        "/referral — your referral link & points\n"
+        "/claim — claim points for social tasks\n"
+        "/leaderboard — top 10 points\n\n"
         "_60-day post-war history window_",
         parse_mode="Markdown",
     )
+
+
+# ---------------------------------------------------------------------------
+# /referral — show referral info & link
+# ---------------------------------------------------------------------------
+
+async def cmd_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    username = _resolve_username(user)
+
+    try:
+        data = _redis_cmd("HGETALL", _user_key(username))
+        if not data or not data.get("result"):
+            await update.message.reply_text(
+                "You don't have a points account yet. Send /start first!"
+            )
+            return
+
+        # HGETALL returns flat list: [key, val, key, val, ...]
+        raw = data["result"]
+        fields = dict(zip(raw[0::2], raw[1::2])) if isinstance(raw, list) else raw
+
+        ref_code = fields.get("referral_code", "???")
+        points = fields.get("points", "0")
+        referral_count = fields.get("referral_count", "0")
+
+        # Leaderboard rank
+        rank_data = _redis_cmd("ZREVRANK", "points:leaderboard", username)
+        rank = (int(rank_data["result"]) + 1) if rank_data and rank_data.get("result") is not None else "?"
+
+        ref_link = f"https://t.me/usoil_ai_bot?start=REF_{ref_code}"
+
+        await update.message.reply_text(
+            f"🏆 *Your Referral Dashboard*\n\n"
+            f"📊 Points: *{points}*\n"
+            f"🏅 Rank: *#{rank}*\n"
+            f"👥 Referrals: *{referral_count}*\n\n"
+            f"🔗 Your referral code: `{ref_code}`\n"
+            f"🔗 Share link:\n`{ref_link}`\n\n"
+            f"_Earn {POINTS_REFERRAL_SIGNUP} pts per referral!_",
+            parse_mode="Markdown",
+        )
+    except Exception as exc:
+        log.error("cmd_referral error for %s: %s", username, exc)
+        await update.message.reply_text("Something went wrong. Try again later.")
+
+
+# ---------------------------------------------------------------------------
+# /claim — claim points for social tasks (x, discord)
+# ---------------------------------------------------------------------------
+
+CLAIM_TASKS = {
+    "x": {
+        "field": "claimed_x",
+        "points": POINTS_FOLLOW_X,
+        "event": "follow_x",
+        "label": "Following on X",
+    },
+    "discord": {
+        "field": "claimed_discord",
+        "points": POINTS_JOIN_DISCORD,
+        "event": "join_discord",
+        "label": "Joining Discord",
+    },
+}
+
+
+async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    username = _resolve_username(user)
+
+    if not context.args:
+        tasks_list = "\n".join(
+            f"  `/claim {k}` — {v['label']} (+{v['points']} pts)"
+            for k, v in CLAIM_TASKS.items()
+        )
+        await update.message.reply_text(
+            f"🎯 *Claim Points*\n\n{tasks_list}",
+            parse_mode="Markdown",
+        )
+        return
+
+    task_key = context.args[0].lower()
+    task = CLAIM_TASKS.get(task_key)
+    if not task:
+        await update.message.reply_text(
+            f"Unknown task `{task_key}`. Options: {', '.join(CLAIM_TASKS.keys())}",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        # Check if user exists
+        exists = _redis_cmd("HGET", _user_key(username), "tg_id")
+        if not exists or not exists.get("result"):
+            await update.message.reply_text("Send /start first to create your account!")
+            return
+
+        # Check if already claimed
+        already = _redis_cmd("HGET", _user_key(username), task["field"])
+        if already and already.get("result"):
+            await update.message.reply_text(
+                f"✅ You already claimed points for *{task['label']}*.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Award and mark claimed
+        _award_points(username, task["points"], task["event"])
+        _redis_cmd("HSET", _user_key(username), task["field"], "1")
+
+        # Get new total
+        total = _redis_cmd("HGET", _user_key(username), "points")
+        total_pts = total["result"] if total and total.get("result") else "?"
+
+        await update.message.reply_text(
+            f"🎉 +{task['points']} points for *{task['label']}*!\n\n"
+            f"Your total: *{total_pts}* points",
+            parse_mode="Markdown",
+        )
+    except Exception as exc:
+        log.error("cmd_claim error for %s: %s", username, exc)
+        await update.message.reply_text("Something went wrong. Try again later.")
+
+
+# ---------------------------------------------------------------------------
+# /leaderboard — top 10
+# ---------------------------------------------------------------------------
+
+async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        data = _redis_cmd("ZREVRANGE", "points:leaderboard", "0", "9", "WITHSCORES")
+        if not data or not data.get("result"):
+            await update.message.reply_text("No leaderboard data yet. Be the first to /start!")
+            return
+
+        raw = data["result"]
+        # Upstash returns: [member, score, member, score, ...]
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i in range(0, len(raw), 2):
+            name = raw[i]
+            score = raw[i + 1]
+            rank_num = i // 2
+            medal = medals[rank_num] if rank_num < len(medals) else f"#{rank_num + 1}"
+            # Try to get display name
+            display = name
+            user_data = _redis_cmd("HGET", _user_key(name), "display_name")
+            if user_data and user_data.get("result"):
+                display = user_data["result"]
+            lines.append(f"{medal} {display} — *{int(float(score))}* pts")
+
+        board = "\n".join(lines)
+        await update.message.reply_text(
+            f"🏆 *Top 10 Leaderboard*\n\n{board}",
+            parse_mode="Markdown",
+        )
+    except Exception as exc:
+        log.error("cmd_leaderboard error: %s", exc)
+        await update.message.reply_text("Something went wrong. Try again later.")
 
 
 async def run_forecast(instrument: str, update: Update):
@@ -2489,6 +2770,9 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("alert",        cmd_alert))
     ptb_app.add_handler(CommandHandler("alerts",       cmd_alerts))
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
+    ptb_app.add_handler(CommandHandler("referral",     cmd_referral))
+    ptb_app.add_handler(CommandHandler("claim",        cmd_claim))
+    ptb_app.add_handler(CommandHandler("leaderboard",  cmd_leaderboard))
 
     ptb_app.job_queue.run_repeating(check_price_alerts,  interval=300,    first=15)
     ptb_app.job_queue.run_repeating(check_volume_spike,        interval=300,  first=30)
