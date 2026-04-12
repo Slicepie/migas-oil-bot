@@ -157,6 +157,115 @@ TICKERS = {
 }
 
 # ---------------------------------------------------------------------------
+# Hyperliquid 24/7 pricing fallback (WTI perp on XYZ DEX)
+# ---------------------------------------------------------------------------
+# CME futures (CL=F) only update during market hours.
+# Hyperliquid xyz:CL trades 24/7 — use as fallback when CL=F is stale.
+
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+
+# Map MARKET_TICKERS symbols to Hyperliquid xyz: symbols
+_HL_SYMBOLS: dict[str, str] = {
+    "CL=F":   "xyz:CL",       # WTI crude
+    "BZ=F":   "xyz:BRENTOIL", # Brent crude
+    # BTC-USD, ^GSPC, NG=F — not on Hyperliquid XYZ, skip
+}
+
+_hl_cache: dict[str, tuple[float, float]] = {}  # symbol -> (price, timestamp)
+_HL_CACHE_TTL = 10  # seconds
+
+import time as _time
+
+
+def _fetch_hyperliquid_price(hl_symbol: str) -> float | None:
+    """Fetch a single price from Hyperliquid. Uses 10s cache to avoid spam."""
+    import time
+    now = time.time()
+    cached = _hl_cache.get(hl_symbol)
+    if cached and (now - cached[1]) < _HL_CACHE_TTL:
+        return cached[0]
+
+    try:
+        resp = requests.post(
+            HYPERLIQUID_INFO_URL,
+            json={"type": "allMids", "dex": "xyz"},
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            mids = resp.json()
+            # Cache all prices from this response
+            for sym, price_str in mids.items():
+                try:
+                    _hl_cache[sym] = (float(price_str), now)
+                except (ValueError, TypeError):
+                    pass
+            if hl_symbol in _hl_cache:
+                return _hl_cache[hl_symbol][0]
+    except Exception as exc:
+        log.warning("Hyperliquid price fetch failed: %s", exc)
+    return None
+
+
+def _is_cme_market_open() -> bool:
+    """Check if CME crude oil futures are likely trading.
+    CME WTI: Sun 5pm CT – Fri 4pm CT, with a daily break 4pm-5pm CT.
+    Simplified: if Yahoo returns a price < 30 min old, it's 'open'.
+    We use a rough heuristic instead to avoid extra API calls.
+    """
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+    # Convert to CT (UTC-5 standard, UTC-6 daylight — approximate with UTC-5)
+    ct_hour = (now_utc.hour - 5) % 24
+    ct_weekday = now_utc.weekday()  # Mon=0, Sun=6
+
+    # Closed: Saturday all day, Sunday before 5pm CT, Friday after 4pm CT
+    if ct_weekday == 5:  # Saturday
+        return False
+    if ct_weekday == 6 and ct_hour < 17:  # Sunday before 5pm CT
+        return False
+    if ct_weekday == 4 and ct_hour >= 16:  # Friday after 4pm CT
+        return False
+    # Daily maintenance break: 4pm-5pm CT
+    if ct_hour == 16:
+        return False
+    return True
+
+
+def fetch_price_with_fallback(yf_ticker: str) -> float | None:
+    """Fetch price from Yahoo Finance, fall back to Hyperliquid if stale/unavailable."""
+    # Try Yahoo first
+    try:
+        hist = yf.Ticker(yf_ticker).history(period="1d", interval="5m")[["Close"]]
+        if not hist.empty:
+            price = round(float(hist["Close"].iloc[-1]), 4)
+            # Check staleness — if last bar is >30 min old and market should be closed
+            last_ts = hist.index[-1]
+            from datetime import datetime, timezone
+            age_min = (datetime.now(timezone.utc) - last_ts.to_pydatetime().astimezone(timezone.utc)).total_seconds() / 60
+            if age_min < 30:
+                return price  # fresh — use it
+            # Stale — try Hyperliquid
+            hl_sym = _HL_SYMBOLS.get(yf_ticker)
+            if hl_sym:
+                hl_price = _fetch_hyperliquid_price(hl_sym)
+                if hl_price:
+                    log.info("Using Hyperliquid %s price $%.2f (Yahoo %s stale by %.0f min)",
+                             hl_sym, hl_price, yf_ticker, age_min)
+                    return round(hl_price, 4)
+            return price  # stale Yahoo is better than nothing
+    except Exception:
+        pass
+
+    # Yahoo failed entirely — try Hyperliquid
+    hl_sym = _HL_SYMBOLS.get(yf_ticker)
+    if hl_sym:
+        hl_price = _fetch_hyperliquid_price(hl_sym)
+        if hl_price:
+            log.info("Yahoo %s failed, using Hyperliquid %s: $%.2f", yf_ticker, hl_sym, hl_price)
+            return round(hl_price, 4)
+    return None
+
+# ---------------------------------------------------------------------------
 # Volume spike detection config
 # ---------------------------------------------------------------------------
 VOLUME_SPIKE_MULTIPLIER  = 1.5    # alert if current 5-min vol > 1.5x hourly baseline
@@ -1844,13 +1953,7 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
         import yfinance as _yf
 
         def _fetch_one(ticker: str) -> float | None:
-            try:
-                hist = _yf.Ticker(ticker).history(period="1d", interval="5m")[["Close"]]
-                if not hist.empty:
-                    return round(float(hist["Close"].iloc[-1]), 4)
-            except Exception:
-                pass
-            return None
+            return fetch_price_with_fallback(ticker)
 
         loop = _asyncio.get_event_loop()
         tasks = {

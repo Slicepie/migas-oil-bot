@@ -21,10 +21,18 @@ LOG_FILE = Path(__file__).parent / "signal_log.jsonl"
 
 
 def _current_wti() -> float | None:
-    """Fetch current WTI futures price (CL=F).
-    Always uses CL=F so price_at_alert is on the same instrument as the
-    dashboard scorer which fetches CL=F from Yahoo Finance.
+    """Fetch current WTI futures price.
+    Uses CL=F (Yahoo Finance) during market hours, falls back to
+    Hyperliquid xyz:CL perp for 24/7 off-hours pricing.
     """
+    try:
+        from bot import fetch_price_with_fallback
+        price = fetch_price_with_fallback("CL=F")
+        if price:
+            return round(price, 2)
+    except ImportError:
+        pass
+    # Fallback to plain Yahoo if bot module unavailable
     try:
         ticker = yf.Ticker("CL=F")
         hist   = ticker.history(period="1d", interval="5m")[["Close"]]
