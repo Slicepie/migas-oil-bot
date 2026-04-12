@@ -102,8 +102,10 @@ def sse_push(market: str, event: dict) -> None:
 
 def sse_push_signal(all_markets: dict, meta: dict, prices: dict,
                     signal_id: str, text: str, ts: str) -> None:
-    """Push a multi-market signal to all relevant SSE streams."""
+    """Push a multi-market signal to all relevant SSE streams. Skips score=0 markets."""
     for market, data in all_markets.items():
+        if data.get("score", 0) == 0:
+            continue  # traders only get actionable signals
         event = {
             "signal_id":      signal_id,
             "ts":             ts,
