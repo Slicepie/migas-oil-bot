@@ -206,6 +206,45 @@ def _fetch_hyperliquid_price(hl_symbol: str) -> float | None:
     return None
 
 
+# Cache for Hyperliquid detailed market data (volume, OI, funding)
+_hl_detail_cache: dict[str, tuple[dict, float]] = {}  # symbol -> (data, timestamp)
+_HL_DETAIL_CACHE_TTL = 30  # seconds
+
+
+def _fetch_hyperliquid_details() -> dict[str, dict]:
+    """Fetch detailed market data from Hyperliquid (volume, OI, funding).
+    Returns {symbol: {dayNtlVlm, dayBaseVlm, oraclePx, markPx, funding, openInterest}} for all xyz markets.
+    """
+    import time
+    now = time.time()
+
+    # Check if any cached entry is fresh
+    if _hl_detail_cache and all((now - v[1]) < _HL_DETAIL_CACHE_TTL for v in _hl_detail_cache.values()):
+        return {k: v[0] for k, v in _hl_detail_cache.items()}
+
+    try:
+        resp = requests.post(
+            HYPERLIQUID_INFO_URL,
+            json={"type": "metaAndAssetCtxs", "dex": "xyz"},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        meta = data[0]  # {universe: [{name, ...}, ...]}
+        ctxs = data[1]  # [{dayNtlVlm, openInterest, ...}, ...]
+
+        result = {}
+        for asset_info, ctx in zip(meta.get("universe", []), ctxs):
+            name = asset_info.get("name", "")
+            _hl_detail_cache[name] = (ctx, now)
+            result[name] = ctx
+        return result
+    except Exception as exc:
+        log.warning("Hyperliquid detail fetch failed: %s", exc)
+        return {}
+
+
 def _is_cme_market_open() -> bool:
     """Check if CME crude oil futures are likely trading.
     CME WTI: Sun 5pm CT – Fri 4pm CT, with a daily break 4pm-5pm CT.
@@ -1134,6 +1173,19 @@ async def cmd_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             lines.append(f"{label}: {price_str}  _({source})_{hl_str}")
 
+        # Hyperliquid WTI volume & OI
+        hl_details = _fetch_hyperliquid_details()
+        cl_detail = hl_details.get("xyz:CL") or hl_details.get("CL")
+        if cl_detail:
+            ntl_vlm = float(cl_detail.get("dayNtlVlm", 0))
+            oi = float(cl_detail.get("openInterest", 0))
+            funding = float(cl_detail.get("funding", 0))
+            lines.append("")
+            lines.append("📊 *Hyperliquid WTI 24h*")
+            lines.append(f"Volume: `${ntl_vlm / 1e6:,.1f}M`")
+            lines.append(f"Open Interest: `${oi / 1e6:,.1f}M`")
+            lines.append(f"Funding: `{funding * 100:.4f}%`")
+
         await msg.edit_text("\n".join(lines), parse_mode="Markdown")
     except Exception as exc:
         log.exception("Prices command error")
@@ -1635,16 +1687,152 @@ async def _volume_direction_check(context: ContextTypes.DEFAULT_TYPE):
         log.exception("Volume direction check failed")
 
 
+# ---------------------------------------------------------------------------
+# Hyperliquid volume tracking — 1-min polling for off-hours volume spikes
+# ---------------------------------------------------------------------------
+_hl_last_ntl_vlm: float | None = None          # last dayNtlVlm reading
+_hl_last_vlm_ts:  datetime | None = None        # timestamp of last reading
+HL_VOLUME_SPIKE_THRESHOLD_M = 5.0               # alert if 1-min notional delta > $5M
+
+
+async def check_volume_hyperliquid(context: ContextTypes.DEFAULT_TYPE):
+    """Poll Hyperliquid WTI volume every 60s. Alert on spikes when CME is closed."""
+    global _hl_last_ntl_vlm, _hl_last_vlm_ts
+
+    # Only run when CME is closed — during CME hours, check_volume_spike handles it
+    if _is_cme_market_open():
+        return
+
+    try:
+        details = _fetch_hyperliquid_details()
+        cl = details.get("xyz:CL") or details.get("CL")
+        if not cl:
+            return
+
+        current_ntl = float(cl.get("dayNtlVlm", 0))
+        current_px  = float(cl.get("oraclePx", 0) or cl.get("markPx", 0))
+        now = datetime.now(timezone.utc)
+
+        if _hl_last_ntl_vlm is None or _hl_last_vlm_ts is None:
+            # First reading — just store baseline
+            _hl_last_ntl_vlm = current_ntl
+            _hl_last_vlm_ts  = now
+            return
+
+        # Calculate delta since last reading
+        elapsed_sec = (now - _hl_last_vlm_ts).total_seconds()
+        if elapsed_sec < 30:
+            return  # too soon
+
+        delta_ntl = current_ntl - _hl_last_ntl_vlm
+        delta_m   = delta_ntl / 1e6
+
+        # Update baseline
+        _hl_last_ntl_vlm = current_ntl
+        _hl_last_vlm_ts  = now
+
+        # Day reset — volume went down, means new day
+        if delta_ntl < 0:
+            return
+
+        if delta_m < HL_VOLUME_SPIKE_THRESHOLD_M:
+            return
+
+        # Check cooldown (shared with CME volume spike)
+        last_alert = context.bot_data.get("last_volume_alert")
+        if last_alert and (now - last_alert).total_seconds() < VOLUME_COOLDOWN_MIN * 60:
+            return
+
+        context.bot_data["last_volume_alert"] = now
+        post_age_min = _last_trump_post_age_minutes()
+
+        insider_flag = post_age_min > 15
+        if post_age_min <= 15:
+            trump_ctx = f"⚠️ Trump posted *{post_age_min:.0f} min ago* — spike likely post-driven"
+        elif post_age_min <= 60:
+            trump_ctx = f"⏱ Last Trump post: {post_age_min:.0f} min ago — no recent post"
+        else:
+            trump_ctx = f"🔴 No Trump post in {post_age_min:.0f} min — *possible insider/institutional flow*"
+
+        interval_min = elapsed_sec / 60
+        signal_text = (
+            f"Hyperliquid WTI volume spike: ${delta_m:.1f}M in {interval_min:.0f} min. "
+            f"Price: ${current_px:.2f}. {trump_ctx.replace('*','').replace('_','')}"
+        )
+
+        signal_id = log_signal(
+            signal_type    = "volume_spike",
+            direction      = "NEUTRAL",
+            score          = 0,
+            price_at_alert = current_px,
+            extra          = {"source": "hyperliquid", "delta_ntl_m": round(delta_m, 1), "post_age_min": round(post_age_min), "insider_flag": insider_flag},
+        )
+        _schedule_follow_ups(context.job_queue, signal_id, current_px)
+
+        save_signal_to_dashboard(
+            signal_id      = signal_id or f"vol_hl_{int(now.timestamp())}",
+            ts             = now.isoformat(),
+            score          = 0,
+            direction      = "NEUTRAL",
+            text           = signal_text,
+            signals        = [],
+            signal_type    = "volume_spike",
+            price_at_alert = current_px,
+        )
+
+        insider_label = "\n🚨 *INSIDER FLAG* — no Trump post before spike" if insider_flag else ""
+        msg = (
+            f"⚡ *Volume Spike — Hyperliquid WTI* (off-hours)\n\n"
+            f"Notional: `${delta_m:.1f}M` in {interval_min:.0f} min\n"
+            f"Price: `${current_px:.2f}`\n\n"
+            f"{trump_ctx}"
+            f"{insider_label}\n\n"
+            f"⏳ _Direction resolves in 5 min…_"
+        )
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+            except Exception:
+                log.exception("Failed to send HL volume alert to %s", uid)
+
+        asyncio.ensure_future(tweet_volume_spike(
+            ratio=delta_m, volume=delta_ntl, price=current_px,
+            insider_flag=insider_flag,
+        ))
+
+        context.job_queue.run_once(
+            _volume_direction_check,
+            when=300,
+            data={
+                "entry_price": current_px,
+                "ratio": round(delta_m, 1),
+                "insider_flag": insider_flag,
+                "signal_id": signal_id,
+            },
+        )
+
+        log.info("HL volume spike: $%.1fM in %.0f min, price $%.2f, Trump post %.0f min ago",
+                 delta_m, interval_min, current_px, post_age_min)
+
+    except Exception:
+        log.exception("Hyperliquid volume check failed")
+
+
 async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
-    """Check CL=F 5-min volume for unusual spikes.
+    """Check CL=F 5-min volume for unusual spikes (CME hours only).
 
     Fires an alert if:
     1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER (1.5x) × hourly baseline
     2. Cooldown since last volume alert has passed
 
     Always fires regardless of Trump post — instead reports post context in message.
+    Off-hours volume is monitored by check_volume_hyperliquid instead.
     """
     import pandas as pd
+
+    # Skip when CME is closed — Hyperliquid monitor handles off-hours
+    if not _is_cme_market_open():
+        return
 
     try:
         baseline = _get_volume_baseline()
@@ -2303,7 +2491,8 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("cancelalert",  cmd_cancelalert))
 
     ptb_app.job_queue.run_repeating(check_price_alerts,  interval=300,    first=15)
-    ptb_app.job_queue.run_repeating(check_volume_spike,  interval=300,    first=30)
+    ptb_app.job_queue.run_repeating(check_volume_spike,        interval=300,  first=30)
+    ptb_app.job_queue.run_repeating(check_volume_hyperliquid, interval=60,   first=15)
     ptb_app.job_queue.run_repeating(refresh_post_cache,  interval=6*3600, first=10)
     ptb_app.job_queue.run_repeating(check_trump_posts,   interval=600,    first=60)
     ptb_app.job_queue.run_repeating(rolling_forecast,    interval=ROLLING_FORECAST_INTERVAL_H * 3600, first=120)
