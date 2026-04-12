@@ -1043,7 +1043,7 @@ def generate_forecast_chart(
         ax.grid(True, alpha=0.15, color="#555577")
 
         # Watermark
-        fig.text(0.98, 0.02, "USOIL.AI · Migas-1.5", ha="right", fontsize=8, color="#555577")
+        fig.text(0.98, 0.02, "USOIL.AI · Migas-1.5", ha="right", fontsize=10, color="#8888aa", fontweight="bold")
 
         plt.tight_layout()
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix="forecast_")
