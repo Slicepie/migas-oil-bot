@@ -456,7 +456,7 @@ def _last_trump_post_age_minutes() -> float:
 
 
 def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[list[dict], float]:
-    """Fetch oil prices via yfinance.
+    """Fetch oil prices via yfinance with Hyperliquid fallback for off-hours.
 
     Args:
         instrument: "wti" or "brent"
@@ -464,7 +464,7 @@ def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[lis
 
     Returns:
         price_data: list of {t, y_t} dicts sorted by date
-        current_price: latest closing price
+        current_price: latest price (Hyperliquid when CME closed, else Yahoo)
     """
     ticker_sym, _ = TICKERS[instrument]
     ticker = yf.Ticker(ticker_sym)
@@ -476,6 +476,14 @@ def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[lis
         for _, row in hist.iterrows()
     ]
     current_price = float(hist["Close"].iloc[-1])
+
+    # If CME is closed, use Hyperliquid for a live current price
+    if instrument == "wti" and not _is_cme_market_open():
+        hl_price = _fetch_hyperliquid_price("CL=F")
+        if hl_price:
+            current_price = hl_price
+            log.info("fetch_prices: using Hyperliquid price $%.2f (CME closed)", hl_price)
+
     return price_data, current_price
 
 
@@ -967,6 +975,85 @@ def build_summary(current_price: float, instrument: str = "wti") -> str:
         f"Ceasefire or de-escalation signals would be bearish. "
         f"Monitor Trump energy policy statements and OPEC+ emergency meetings."
     )
+
+
+def generate_forecast_chart(
+    price_data: list[dict],
+    forecast: list[float],
+    current_price: float,
+    instrument: str = "wti",
+) -> str | None:
+    """Generate a forecast chart image and return the file path, or None on failure."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from datetime import datetime, timedelta
+        import tempfile
+
+        label = "WTI" if instrument == "wti" else "Brent"
+
+        # Historical prices (last 30 days for readability)
+        hist_dates = [datetime.strptime(d["t"], "%Y-%m-%d") for d in price_data[-30:]]
+        hist_prices = [d["y_t"] for d in price_data[-30:]]
+
+        # Forecast dates
+        last_date = hist_dates[-1] if hist_dates else datetime.now()
+        fc_dates = [last_date + timedelta(days=i) for i in range(1, len(forecast) + 1)]
+        fc_prices = list(forecast)
+
+        # Connect history to forecast
+        fc_dates_full = [last_date] + fc_dates
+        fc_prices_full = [current_price] + fc_prices
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor("#1a1a2e")
+        ax.set_facecolor("#1a1a2e")
+
+        # Historical line
+        ax.plot(hist_dates, hist_prices, color="#ffffff", linewidth=1.5, label="Historical")
+
+        # Forecast line
+        end_price = forecast[-1]
+        fc_color = "#00d4aa" if end_price >= current_price else "#ff6b6b"
+        ax.plot(fc_dates_full, fc_prices_full, color=fc_color, linewidth=2, linestyle="--", label="Forecast")
+        ax.fill_between(fc_dates_full, fc_prices_full, current_price, alpha=0.15, color=fc_color)
+
+        # Current price line
+        ax.axhline(y=current_price, color="#555577", linewidth=0.8, linestyle=":")
+
+        # Labels
+        change_pct = (end_price - current_price) / current_price * 100
+        direction = "▲" if end_price > current_price else "▼"
+        ax.set_title(
+            f"{label} {len(forecast)}-Day Forecast  |  ${current_price:.2f} → ${end_price:.2f} ({change_pct:+.1f}%) {direction}",
+            color="white", fontsize=13, fontweight="bold", pad=15,
+        )
+        ax.set_ylabel("Price ($)", color="#aaaacc", fontsize=10)
+        ax.tick_params(colors="#aaaacc", labelsize=9)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        plt.xticks(rotation=30)
+
+        for spine in ax.spines.values():
+            spine.set_color("#333355")
+
+        ax.legend(loc="upper left", fontsize=9, facecolor="#1a1a2e", edgecolor="#333355", labelcolor="white")
+        ax.grid(True, alpha=0.15, color="#555577")
+
+        # Watermark
+        fig.text(0.98, 0.02, "USOIL.AI · Migas-1.5", ha="right", fontsize=8, color="#555577")
+
+        plt.tight_layout()
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix="forecast_")
+        fig.savefig(tmp.name, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Forecast chart saved: %s", tmp.name)
+        return tmp.name
+    except Exception as exc:
+        log.warning("Forecast chart generation failed: %s", exc)
+        return None
 
 
 def format_forecast(forecast: list[float], current_price: float, instrument: str = "wti") -> str:
@@ -1886,6 +1973,9 @@ async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
         forecast_text = format_forecast(forecast, current_price, "wti")
         scenarios     = format_scenarios(output, current_price)
 
+        # Generate forecast chart
+        chart_path = generate_forecast_chart(price_data, forecast, current_price, "wti")
+
         msg = (
             f"🔄 *Rolling Forecast Update*\n\n"
             f"{forecast_text}"
@@ -1899,15 +1989,30 @@ async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
         )
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown", disable_web_page_preview=True,)
+                if chart_path:
+                    await context.bot.send_photo(
+                        chat_id=uid, photo=open(chart_path, "rb"),
+                        caption=msg, parse_mode="Markdown",
+                    )
+                else:
+                    await context.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown", disable_web_page_preview=True,)
             except Exception:
                 log.exception("Failed to send rolling forecast to %s", uid)
 
-        # Tweet forecast (async, after Telegram)
-        asyncio.ensure_future(tweet_forecast(
+        # Tweet forecast with chart (awaited so chart file stays alive)
+        await tweet_forecast(
             forecast=forecast, current_price=current_price,
             pred_len=ROLLING_FORECAST_PRED_LEN,
-        ))
+            chart_path=chart_path,
+        )
+
+        # Clean up chart file after tweet is done
+        if chart_path:
+            try:
+                import os
+                os.unlink(chart_path)
+            except Exception:
+                pass
 
         log.info("Rolling forecast: done — %d-day forecast from $%.2f", ROLLING_FORECAST_PRED_LEN, current_price)
 
