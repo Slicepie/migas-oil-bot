@@ -80,6 +80,9 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 # to every queue instantly. Client disconnect removes the queue from the set.
 
 _sse_clients: dict[str, set[asyncio.Queue]] = {}  # market -> set of queues
+_sse_ip_count: dict[str, int] = {}                # IP -> active connection count
+MAX_SSE_CLIENTS_TOTAL = 200       # hard cap across all markets
+MAX_SSE_PER_IP        = 3         # max connections per IP address
 
 
 def sse_push(market: str, event: dict) -> None:
@@ -1585,6 +1588,15 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
     filter_conf  = request.query.get("confidence", "")
     filter_theme = request.query.get("post_theme", "")
 
+    # ── Connection limits ──────────────────────────────────────────────
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or "unknown"
+    total_clients = sum(len(s) for s in _sse_clients.values())
+
+    if total_clients >= MAX_SSE_CLIENTS_TOTAL:
+        return web.json_response({"error": "Server at capacity"}, status=503)
+    if _sse_ip_count.get(client_ip, 0) >= MAX_SSE_PER_IP:
+        return web.json_response({"error": "Too many connections from this IP"}, status=429)
+
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -1610,12 +1622,13 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
     })
     await resp.write(f"event: connected\ndata: {connected_data}\n\n".encode())
 
-    # Register this client
+    # Register this client + track IP
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
     if market not in _sse_clients:
         _sse_clients[market] = set()
     _sse_clients[market].add(q)
-    log.info("SSE client connected for %s (total: %d)", market, len(_sse_clients[market]))
+    _sse_ip_count[client_ip] = _sse_ip_count.get(client_ip, 0) + 1
+    log.info("SSE client connected for %s from %s (total: %d)", market, client_ip, total_clients + 1)
 
     try:
         while True:
@@ -1643,8 +1656,11 @@ async def handle_sse_stream(request: web.Request) -> web.StreamResponse:
         pass
     finally:
         _sse_clients.get(market, set()).discard(q)
-        log.info("SSE client disconnected from %s (remaining: %d)",
-                 market, len(_sse_clients.get(market, set())))
+        _sse_ip_count[client_ip] = max(0, _sse_ip_count.get(client_ip, 1) - 1)
+        if _sse_ip_count.get(client_ip) == 0:
+            _sse_ip_count.pop(client_ip, None)
+        remaining = sum(len(s) for s in _sse_clients.values())
+        log.info("SSE client disconnected from %s [%s] (remaining: %d)", market, client_ip, remaining)
 
     return resp
 
