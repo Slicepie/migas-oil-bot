@@ -11,7 +11,7 @@ Commands:
 
 History window: 60 days — post-war regime only, pre-war data excluded.
 Brent is more sensitive to Hormuz/OPEC/Iran; WTI to US domestic policy.
-Private: only ALLOWED_USER_IDS can interact with the bot.
+Open: any user can /start and receive signals. ALLOWED_USER_IDS grows dynamically.
 """
 
 import asyncio
@@ -219,16 +219,16 @@ def _award_points(username: str, points: int, event_type: str, meta: dict | None
 
 
 # ---------------------------------------------------------------------------
-# Auth decorator
+# Auth decorator (admin-only commands, if needed in the future)
 # ---------------------------------------------------------------------------
 
-def restricted(func):
+def admin_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
-        if uid not in ALLOWED_USER_IDS:
-            log.warning("Unauthorized access attempt by user %s", uid)
-            await update.message.reply_text("⛔ Unauthorized.")
+        if uid not in ADMIN_USER_IDS:
+            log.warning("Non-admin access attempt by user %s", uid)
+            await update.message.reply_text("⛔ Admin only.")
             return
         return await func(update, context)
     return wrapper
@@ -1622,12 +1622,13 @@ async def refresh_post_cache(context: ContextTypes.DEFAULT_TYPE):
 
 
 def _schedule_follow_ups(job_queue, signal_id: str, price_at_alert: float) -> None:
-    """Schedule 15min, 1hr, 24hr follow-up price checks for a signal."""
+    """Schedule 5min, 15min, 1hr, 24hr follow-up price checks for a signal."""
     async def _check(ctx, window: str):
         price = _current_wti()
         if price:
             follow_up(signal_id, window, price)
 
+    job_queue.run_once(lambda ctx: _check(ctx, "5m"),  when=300)
     job_queue.run_once(lambda ctx: _check(ctx, "15m"), when=900)
     job_queue.run_once(lambda ctx: _check(ctx, "1h"),  when=3600)
     job_queue.run_once(lambda ctx: _check(ctx, "24h"), when=86400)
@@ -1888,6 +1889,43 @@ async def daily_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
             log.exception("Daily briefing failed for %s", uid)
 
 
+async def generate_daily_blog_recap(context: ContextTypes.DEFAULT_TYPE):
+    """Generate a daily blog recap post on usoil.ai after CME close (22:00 UTC).
+
+    Calls the /api/blog/generate-recap endpoint on the dashboard which pulls
+    all signals for the day from Redis and generates a blog post.
+    """
+    import aiohttp
+    log.info("Daily blog recap: generating…")
+    try:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://www.usoil.ai/api/blog/generate-recap",
+                json={"date": date, "secret": WEBHOOK_SECRET},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    sig_count = data.get("recap", {}).get("signalCount", 0)
+                    log.info("Daily blog recap: published for %s (%d signals)", date, sig_count)
+                    # Notify admin
+                    for uid in ADMIN_USER_IDS:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=uid,
+                                text=f"📝 Blog recap published for {date} — {sig_count} signals\nhttps://www.usoil.ai/blog/daily/{date}",
+                                disable_web_page_preview=True,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    body = await resp.text()
+                    log.error("Daily blog recap: HTTP %s — %s", resp.status, body[:200])
+    except Exception:
+        log.exception("Daily blog recap failed")
+
+
 async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
     """Run a rolling 16-day WTI forecast every 12 hours.
 
@@ -2144,10 +2182,7 @@ async def check_volume_hyperliquid(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("Failed to send HL volume alert to %s", uid)
 
-        asyncio.ensure_future(tweet_volume_spike(
-            ratio=delta_m, volume=delta_ntl, price=current_px,
-            insider_flag=insider_flag,
-        ))
+        # Volume spikes no longer tweeted — Telegram only
 
         context.job_queue.run_once(
             _volume_direction_check,
@@ -2270,10 +2305,7 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
                 log.exception("Failed to send volume alert to %s", uid)
 
         # Tweet volume spike (async, after Telegram)
-        asyncio.ensure_future(tweet_volume_spike(
-            ratio=ratio, volume=current_vol, price=current_px,
-            insider_flag=insider_flag,
-        ))
+        # Volume spikes no longer tweeted — Telegram only
 
         # Schedule 5-min direction check
         context.job_queue.run_once(
@@ -2297,8 +2329,9 @@ async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        ticker  = yf.Ticker("CL=F")
-        current = float(ticker.history(period="1d")["Close"].iloc[-1])
+        current = _current_wti()
+        if not current:
+            return
     except Exception:
         log.exception("Failed to fetch price for alert check")
         return
@@ -2859,6 +2892,11 @@ async def main_async():
     et = pytz.timezone("America/New_York")
     ptb_app.job_queue.run_daily(daily_morning_briefing, time=datetime.now(et).replace(
         hour=8, minute=30, second=0, microsecond=0
+    ).timetz())
+
+    # Daily blog recap — 5:00pm ET (22:00 UTC), 1h after CME close
+    ptb_app.job_queue.run_daily(generate_daily_blog_recap, time=datetime.now(et).replace(
+        hour=17, minute=0, second=0, microsecond=0
     ).timetz())
 
     # Build aiohttp webhook server

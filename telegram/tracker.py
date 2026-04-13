@@ -30,9 +30,24 @@ def _current_wti() -> float | None:
         price = fetch_price_with_fallback("CL=F")
         if price:
             return round(price, 2)
-    except ImportError:
+    except (ImportError, Exception):
         pass
-    # Fallback to plain Yahoo if bot module unavailable
+    # Fallback: try Hyperliquid directly
+    try:
+        import requests
+        resp = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "allMids", "dex": "xyz"},
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            mids = resp.json()
+            price_str = mids.get("xyz:CL")
+            if price_str:
+                return round(float(price_str), 2)
+    except Exception:
+        pass
+    # Last resort: plain Yahoo
     try:
         ticker = yf.Ticker("CL=F")
         hist   = ticker.history(period="1d", interval="5m")[["Close"]]
