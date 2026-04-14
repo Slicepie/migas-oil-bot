@@ -480,12 +480,12 @@ def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[lis
     ]
     current_price = float(hist["Close"].iloc[-1])
 
-    # If CME is closed, use Hyperliquid for a live current price
-    if instrument == "wti" and not _is_cme_market_open():
+    # Always use Hyperliquid for live current price (24/7, no staleness)
+    if instrument == "wti":
         hl_price = _fetch_hyperliquid_price("CL=F")
         if hl_price:
             current_price = hl_price
-            log.info("fetch_prices: using Hyperliquid price $%.2f (CME closed)", hl_price)
+            log.info("fetch_prices: using Hyperliquid price $%.2f", hl_price)
 
     return price_data, current_price
 
