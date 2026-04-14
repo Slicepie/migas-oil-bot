@@ -808,15 +808,64 @@ async def tweet_signal(
         dir_arrow = "▲" if score > 0 else ("▼" if score < 0 else "—")
         conf_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
         price_str = f"${price:.2f}" if price else ""
-        theme_tag = theme.replace("_", " ").title() if theme and theme != "UNRELATED" else ""
+
+        # Estimated move from theme expectations
+        expectations = THEME_EXPECTATIONS.get(theme, {})
+        est_move = expectations.get("est_move_pct")
+        est_str = ""
+        if est_move is not None:
+            sign = "+" if score > 0 else "-"
+            est_str = f"\n📉 Est. move: {sign}{abs(est_move)}%"
+
+        # Accuracy stats
+        acc_str = ""
+        try:
+            report = get_accuracy_report()
+            w15m = report.get("by_window", {}).get("15m", {})
+            w1h = report.get("by_window", {}).get("1h", {})
+            parts = []
+            if w15m.get("total", 0) >= 3:
+                emoji = "🟢" if w15m["hit_rate"] >= 0.65 else ("🟡" if w15m["hit_rate"] >= 0.50 else "🔴")
+                parts.append(f"15m: {emoji} {w15m['hit_rate']:.0%} ({w15m['correct']}/{w15m['total']})")
+            if w1h.get("total", 0) >= 3:
+                emoji = "🟢" if w1h["hit_rate"] >= 0.65 else ("🟡" if w1h["hit_rate"] >= 0.50 else "🔴")
+                parts.append(f"1h: {emoji} {w1h['hit_rate']:.0%} ({w1h['correct']}/{w1h['total']})")
+            if parts:
+                acc_str = "\n\n📊 Signal accuracy:\n" + "\n".join(parts)
+        except Exception:
+            pass
+
+        # Rationale — trim to fit tweet
+        reason_str = ""
+        if rationale:
+            # Leave room for rest of tweet (~180 chars for rationale)
+            reason_str = f"\n\nTrump (@realdonaldtrump): {rationale[:160]}"
 
         text = (
-            f"⚡ Oil Signal: {score:+d} {dir_arrow} {direction} {conf_map.get(confidence, '')}\n\n"
-            f"🛢 WTI: {price_str}\n"
-            + (f"📌 {theme_tag}\n" if theme_tag else "")
-            + (f"💡 {rationale[:180]}\n" if rationale else "")
-            + f"\n#WTI #CrudeOil #OilTrading #USOIL"
+            f"⚡ WTI Signal Alert: {score:+d} {dir_arrow} {direction} {conf_map.get(confidence, '')}\n\n"
+            f"🛢 WTI: {price_str} @hyperliquidx"
+            f"{est_str}"
+            f"{reason_str}"
+            f"{acc_str}\n\n"
+            f"Join our app & free SSE stream with our API: usoil.ai\n\n"
+            f"#WTI #CrudeOil #OilTrading #USOIL"
         )
+
+        # Twitter limit is 280 chars — trim if needed
+        if len(text) > 280:
+            # Shorten rationale first
+            over = len(text) - 275
+            if rationale and len(rationale) > over + 20:
+                reason_str = f"\n\nTrump (@realdonaldtrump): {rationale[:160 - over]}..."
+                text = (
+                    f"⚡ WTI Signal Alert: {score:+d} {dir_arrow} {direction} {conf_map.get(confidence, '')}\n\n"
+                    f"🛢 WTI: {price_str} @hyperliquidx"
+                    f"{est_str}"
+                    f"{reason_str}"
+                    f"{acc_str}\n\n"
+                    f"Join our app & free SSE stream with our API: usoil.ai\n\n"
+                    f"#WTI #CrudeOil #OilTrading #USOIL"
+                )
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: client.create_tweet(text=text))
