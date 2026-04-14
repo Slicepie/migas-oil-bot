@@ -482,7 +482,7 @@ def fetch_prices(instrument: str = "wti", days: int = HISTORY_DAYS) -> tuple[lis
 
     # Always use Hyperliquid for live current price (24/7, no staleness)
     if instrument == "wti":
-        hl_price = _fetch_hyperliquid_price("CL=F")
+        hl_price = _fetch_hyperliquid_price("xyz:CL")
         if hl_price:
             current_price = hl_price
             log.info("fetch_prices: using Hyperliquid price $%.2f", hl_price)
