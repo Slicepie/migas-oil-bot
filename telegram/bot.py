@@ -120,19 +120,49 @@ def sse_push(market: str, event: dict) -> None:
 
 def sse_push_signal(all_markets: dict, meta: dict, prices: dict,
                     signal_id: str, text: str, ts: str) -> None:
-    """Push a multi-market signal to all relevant SSE streams. Skips score=0 markets."""
+    """Push a multi-market signal to all relevant SSE streams. Skips score=0 markets.
+
+    Enriches each event with trading parameters from THEME_EXPECTATIONS:
+      - hold_window, hit_rate from historical theme data
+      - suggested_sl / suggested_tp calculated from est_move_pct
+    """
+    theme = meta.get("post_theme", "")
+    expectations = THEME_EXPECTATIONS.get(theme, {})
+
     for market, data in all_markets.items():
         if data.get("score", 0) == 0:
             continue  # traders only get actionable signals
+
+        price = prices.get(market)
+        est_move = data.get("est_move_pct") or expectations.get("est_move_pct")
+
+        # Calculate SL/TP from est_move_pct and price
+        suggested_sl = None
+        suggested_tp = None
+        if price and est_move:
+            is_bullish = data.get("score", 0) > 0
+            sl_pct = max(est_move * 0.5, 0.3)  # SL at 50% of expected move, min 0.3%
+            tp_pct = est_move * 1.5             # TP at 150% of expected move
+            if is_bullish:
+                suggested_sl = round(price * (1 - sl_pct / 100), 2)
+                suggested_tp = round(price * (1 + tp_pct / 100), 2)
+            else:
+                suggested_sl = round(price * (1 + sl_pct / 100), 2)
+                suggested_tp = round(price * (1 - tp_pct / 100), 2)
+
         event = {
             "signal_id":      signal_id,
             "ts":             ts,
             "market":         market,
             "data":           data,
-            "price":          prices.get(market),
-            "post_theme":     meta.get("post_theme"),
+            "price":          price,
+            "post_theme":     theme,
             "ambiguity_flag": meta.get("ambiguity_flag", False),
             "text_preview":   text[:200],
+            "hold_window":    expectations.get("hold_window"),
+            "hit_rate":       expectations.get("hit_rate"),
+            "suggested_sl":   suggested_sl,
+            "suggested_tp":   suggested_tp,
         }
         sse_push(market, event)
 
