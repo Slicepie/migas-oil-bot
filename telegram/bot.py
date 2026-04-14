@@ -1978,12 +1978,7 @@ async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("Failed to send rolling forecast to %s", uid)
 
-        # Tweet forecast with chart (awaited so chart file stays alive)
-        await tweet_forecast(
-            forecast=forecast, current_price=current_price,
-            pred_len=ROLLING_FORECAST_PRED_LEN,
-            chart_path=chart_path,
-        )
+        # Forecast tweets disabled — only Trump signals are tweeted
 
         # Clean up chart file after tweet is done
         if chart_path:
