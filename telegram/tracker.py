@@ -21,18 +21,10 @@ LOG_FILE = Path(__file__).parent / "signal_log.jsonl"
 
 
 def _current_wti() -> float | None:
-    """Fetch current WTI futures price.
-    Uses CL=F (Yahoo Finance) during market hours, falls back to
-    Hyperliquid xyz:CL perp for 24/7 off-hours pricing.
+    """Fetch current WTI price from Hyperliquid xyz:CL (24/7).
+    Falls back to Yahoo CL=F if Hyperliquid unavailable.
     """
-    try:
-        from bot import fetch_price_with_fallback
-        price = fetch_price_with_fallback("CL=F")
-        if price:
-            return round(price, 2)
-    except (ImportError, Exception):
-        pass
-    # Fallback: try Hyperliquid directly
+    # Primary: Hyperliquid
     try:
         import requests
         resp = requests.post(
@@ -46,6 +38,14 @@ def _current_wti() -> float | None:
             if price_str:
                 return round(float(price_str), 2)
     except Exception:
+        pass
+    # Fallback: bot module
+    try:
+        from bot import fetch_price_with_fallback
+        price = fetch_price_with_fallback("CL=F")
+        if price:
+            return round(price, 2)
+    except (ImportError, Exception):
         pass
     # Last resort: plain Yahoo
     try:

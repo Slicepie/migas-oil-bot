@@ -359,37 +359,24 @@ def _is_cme_market_open() -> bool:
 
 
 def fetch_price_with_fallback(yf_ticker: str) -> float | None:
-    """Fetch price from Yahoo Finance, fall back to Hyperliquid if stale/unavailable."""
-    # Try Yahoo first
-    try:
-        hist = yf.Ticker(yf_ticker).history(period="1d", interval="5m")[["Close"]]
-        if not hist.empty:
-            price = round(float(hist["Close"].iloc[-1]), 4)
-            # Check staleness — if last bar is >30 min old and market should be closed
-            last_ts = hist.index[-1]
-            from datetime import datetime, timezone
-            age_min = (datetime.now(timezone.utc) - last_ts.to_pydatetime().astimezone(timezone.utc)).total_seconds() / 60
-            if age_min < 30:
-                return price  # fresh — use it
-            # Stale — try Hyperliquid
-            hl_sym = _HL_SYMBOLS.get(yf_ticker)
-            if hl_sym:
-                hl_price = _fetch_hyperliquid_price(hl_sym)
-                if hl_price:
-                    log.info("Using Hyperliquid %s price $%.2f (Yahoo %s stale by %.0f min)",
-                             hl_sym, hl_price, yf_ticker, age_min)
-                    return round(hl_price, 4)
-            return price  # stale Yahoo is better than nothing
-    except Exception:
-        pass
-
-    # Yahoo failed entirely — try Hyperliquid
+    """Fetch price from Hyperliquid first, fall back to Yahoo if unavailable."""
+    # Try Hyperliquid first — 24/7, no staleness issues
     hl_sym = _HL_SYMBOLS.get(yf_ticker)
     if hl_sym:
         hl_price = _fetch_hyperliquid_price(hl_sym)
         if hl_price:
-            log.info("Yahoo %s failed, using Hyperliquid %s: $%.2f", yf_ticker, hl_sym, hl_price)
             return round(hl_price, 4)
+
+    # Hyperliquid failed — fall back to Yahoo
+    try:
+        hist = yf.Ticker(yf_ticker).history(period="1d", interval="5m")[["Close"]]
+        if not hist.empty:
+            price = round(float(hist["Close"].iloc[-1]), 4)
+            log.info("Hyperliquid unavailable, using Yahoo %s: $%.2f", yf_ticker, price)
+            return price
+    except Exception:
+        pass
+
     return None
 
 # ---------------------------------------------------------------------------
