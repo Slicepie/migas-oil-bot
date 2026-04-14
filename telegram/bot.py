@@ -1216,7 +1216,7 @@ async def cmd_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔌 *USOIL Signal API*\n\n"
         "*SSE Stream (free):*\n"
-        "`curl -N http://103.196.86.91:40834/stream/OIL`\n\n"
+        "`curl -N http://api.usoil.ai:40834/stream/OIL`\n\n"
         "*Events:*\n"
         "• `connected` — on connect\n"
         "• `signal` — new signal (non-zero only)\n"
@@ -1227,7 +1227,7 @@ async def cmd_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "```python\n"
         "import requests, json\n"
         "r = requests.get(\n"
-        '    "http://103.196.86.91:40834/stream/OIL",\n'
+        '    "http://api.usoil.ai:40834/stream/OIL",\n'
         "    stream=True\n"
         ")\n"
         "for line in r.iter_lines():\n"
