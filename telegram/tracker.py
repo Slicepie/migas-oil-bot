@@ -154,6 +154,9 @@ def get_accuracy_report() -> dict:
     by_window = {w: {"total": 0, "correct": 0} for w in windows}
     by_type   = {}
 
+    # Exclude volume spikes from accuracy reporting (score=0, always "wrong")
+    records = [r for r in records if r.get("signal_type") != "volume_spike"]
+
     for r in records:
         stype = r.get("signal_type", "unknown")
         if stype not in by_type:
