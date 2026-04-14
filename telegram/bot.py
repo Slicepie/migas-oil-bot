@@ -35,7 +35,7 @@ from news import (
     analogue_signal, format_analogue_signal, net_signal_text,
     is_oil_topic,
 )
-from tracker import log_signal, follow_up, format_accuracy_report, _current_wti
+from tracker import log_signal, follow_up, format_accuracy_report, get_accuracy_report, _current_wti
 from llm_score import llm_score_post, llm_score_multi_market, format_llm_followup, format_multi_market_alert, MARKET_TICKERS, THEME_EXPECTATIONS
 
 load_dotenv()
@@ -1117,26 +1117,125 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:
         log.error("Points registration error for %s: %s", username, exc)
 
-    # --- Original welcome message ------------------------------------------
+    # --- Fetch live accuracy for welcome message ----------------------------
+    accuracy_str = ""
+    try:
+        report = get_accuracy_report()
+        w1h = report.get("by_window", {}).get("1h", {})
+        if w1h.get("total", 0) > 0:
+            hr = w1h["hit_rate"]
+            accuracy_str = f"\n📊 *Live accuracy:* `{hr:.0%}` at 1h ({w1h['correct']}/{w1h['total']} signals)\n"
+    except Exception:
+        pass
+
+    # --- Welcome message ---------------------------------------------------
     await update.message.reply_text(
-        "🛢️ *Migas Oil Bot*\n\n"
-        "Commands:\n"
-        "/signal — trader signal (15min/1hr/24hr) from post analogues\n"
-        "/signals — list last 10 saved signals\n"
-        "/stats — signal accuracy report\n"
+        "🛢️ *USOIL Signal Bot*\n\n"
+        "Welcome! Real-time WTI crude oil signals powered by AI.\n"
+        f"{accuracy_str}\n"
+        "*📡 Signals*\n"
+        "/signal — trader signal from post analogues\n"
+        "/signals — last 10 signals\n"
+        "/stats — signal accuracy report\n\n"
+        "*📈 Forecasts*\n"
         "/forecast — 16-day WTI forecast (Migas-1.5)\n"
-        "/brent — 16-day Brent forecast (Migas-1.5)\n"
+        "/brent — 16-day Brent forecast\n\n"
+        "*💰 Price*\n"
+        "/price — live WTI price (Hyperliquid)\n\n"
+        "*🔔 Alerts*\n"
         "/alert 85.00 — alert when WTI hits $85\n"
         "/alerts — list active alerts\n"
-        "/cancelalert — cancel all alerts\n"
+        "/cancelalert — cancel all alerts\n\n"
+        "*🏆 Points*\n"
         "/referral — your referral link & points\n"
         "/claim — claim points for social tasks\n"
-        "/leaderboard — top 10 points\n\n"
-        "_60-day post-war history window_\n\n"
+        "/leaderboard — top 10\n\n"
+        "*ℹ️ Info*\n"
+        "/info — how our signals work\n"
+        "/api — SSE stream endpoint\n\n"
         "—\n"
-        "🌐 API & Subscription: [www.usoil.ai](https://www.usoil.ai)\n"
-        "💬 Help / Community: @Aiyieldai\n"
-        "🐦 X: [x.com/aiyieldai](https://x.com/aiyieldai)",
+        "🌐 [usoil.ai](https://www.usoil.ai) · "
+        "💬 @Aiyieldai · "
+        "🐦 [X](https://x.com/aiyieldai)",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /price — live WTI price from Hyperliquid
+# ---------------------------------------------------------------------------
+
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    price = _fetch_hyperliquid_price("xyz:CL")
+    brent = _fetch_hyperliquid_price("xyz:BRENTOIL")
+    if price:
+        lines = [f"🛢️ *Live Oil Prices*\n"]
+        lines.append(f"WTI:    `${price:.2f}`")
+        if brent:
+            lines.append(f"Brent:  `${brent:.2f}`")
+        lines.append(f"\n_Source: Hyperliquid xyz dex (24/7)_")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Could not fetch price. Try again in a moment.")
+
+
+# ---------------------------------------------------------------------------
+# /info — how signals work
+# ---------------------------------------------------------------------------
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ℹ️ *How USOIL Signals Work*\n\n"
+        "*Data Sources*\n"
+        "• Truth Social posts monitored in real-time (3-5s latency)\n"
+        "• Historical analogue matching against 60-day post-war window\n"
+        "• Strait of Hormuz vessel tracking via AIS data\n"
+        "• Volume spike detection on CME & Hyperliquid\n\n"
+        "*Signal Scoring*\n"
+        "Each post is scored from -5 (strongly bearish) to +5 (strongly bullish) "
+        "by an LLM that analyzes the text against known oil-moving patterns.\n\n"
+        "*Price Source*\n"
+        "All prices from Hyperliquid `xyz:CL` perpetual — 24/7, no CME staleness.\n\n"
+        "*Forecast Model*\n"
+        "Migas-1.5: probabilistic time-series model trained on 60 days of WTI data "
+        "with geopolitical context injection. Generates base, bull, and bear scenarios.\n\n"
+        "*Accuracy*\n"
+        "Tracked live — every signal is scored at 5m, 15m, 1h, and 24h. "
+        "Use /stats to see current hit rates.",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /api — SSE stream endpoint info
+# ---------------------------------------------------------------------------
+
+async def cmd_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔌 *USOIL Signal API*\n\n"
+        "*SSE Stream (free):*\n"
+        "`curl -N http://103.196.86.91:40834/stream/OIL`\n\n"
+        "*Events:*\n"
+        "• `connected` — on connect\n"
+        "• `signal` — new signal (non-zero only)\n"
+        "• `heartbeat` — every 25s\n\n"
+        "*Filters:*\n"
+        "`?min_score=3&direction=BULLISH`\n\n"
+        "*Python:*\n"
+        "```python\n"
+        "import requests, json\n"
+        "r = requests.get(\n"
+        '    "http://103.196.86.91:40834/stream/OIL",\n'
+        "    stream=True\n"
+        ")\n"
+        "for line in r.iter_lines():\n"
+        '    if line.startswith(b"data: "):\n'
+        "        sig = json.loads(line[6:])\n"
+        '        print(sig["data"]["direction"])\n'
+        "```\n\n"
+        "Full docs: [usoil.ai/docs/api](https://www.usoil.ai/docs/api)",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -2861,6 +2960,9 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("referral",     cmd_referral))
     ptb_app.add_handler(CommandHandler("claim",        cmd_claim))
     ptb_app.add_handler(CommandHandler("leaderboard",  cmd_leaderboard))
+    ptb_app.add_handler(CommandHandler("price",        cmd_price))
+    ptb_app.add_handler(CommandHandler("info",         cmd_info))
+    ptb_app.add_handler(CommandHandler("api",          cmd_api))
 
     ptb_app.job_queue.run_repeating(check_price_alerts,  interval=300,    first=15)
     ptb_app.job_queue.run_repeating(check_volume_spike,        interval=300,  first=30)
