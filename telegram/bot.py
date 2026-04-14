@@ -2323,21 +2323,7 @@ async def _volume_direction_check(context: ContextTypes.DEFAULT_TYPE):
         if signal_id:
             follow_up(signal_id, "5m_direction", now_price)
 
-        # Trigger auto-forecast if direction resolved (not FLAT)
-        if direction != "FLAT" and abs(move_pct) >= 0.1:
-            insider_ctx = " (insider flag — no Trump post)" if insider else ""
-            fake_post = {
-                "score": 4 if move_pct > 0 else -4,
-                "signals": [f"volume_spike_{ratio}x{insider_ctx}"],
-                "text": f"Volume spike {ratio}x baseline, price moved {move_pct:+.2f}% in 5 min.{insider_ctx}",
-                "direction": direction,
-            }
-            last = context.bot_data.get("last_auto_forecast")
-            now = datetime.now(timezone.utc)
-            if last is None or (now - last).total_seconds() > AUTO_FORECAST_COOLDOWN_MIN * 60:
-                context.bot_data["last_auto_forecast"] = now
-                log.info("Auto-forecast triggered by volume spike (%sx, %+.2f%%)", ratio, move_pct)
-                await trigger_auto_forecast(context, fake_post)
+        # Auto-forecast from volume spikes disabled — only Trump posts trigger forecasts
 
     except Exception:
         log.exception("Volume direction check failed")
