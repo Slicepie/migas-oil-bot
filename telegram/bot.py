@@ -847,7 +847,7 @@ async def tweet_signal(
             f"{est_str}"
             f"{reason_str}"
             f"{acc_str}\n\n"
-            f"Join our app & free SSE stream with our API: usoil.ai\n\n"
+            f"Free SSE stream & API at USOIL AI\n\n"
             f"#WTI #CrudeOil #OilTrading #USOIL"
         )
 
@@ -863,7 +863,7 @@ async def tweet_signal(
                     f"{est_str}"
                     f"{reason_str}"
                     f"{acc_str}\n\n"
-                    f"Join our app & free SSE stream with our API: usoil.ai\n\n"
+                    f"Free SSE stream & API at USOIL AI\n\n"
                     f"#WTI #CrudeOil #OilTrading #USOIL"
                 )
 
