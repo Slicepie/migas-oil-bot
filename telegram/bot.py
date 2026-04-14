@@ -2012,6 +2012,145 @@ async def generate_daily_blog_recap(context: ContextTypes.DEFAULT_TYPE):
         log.exception("Daily blog recap failed")
 
 
+# ---------------------------------------------------------------------------
+# Daily X recap — draft sent to admin for approval before posting
+# ---------------------------------------------------------------------------
+
+_pending_tweet_drafts: dict[str, str] = {}  # draft_id -> tweet text
+
+
+async def generate_daily_x_recap(context: ContextTypes.DEFAULT_TYPE):
+    """Generate a daily signal recap tweet draft and send to admin for approval."""
+    log.info("Daily X recap: drafting…")
+    try:
+        report = get_accuracy_report()
+        total = report.get("total", 0)
+        if total == 0:
+            return
+
+        # Get today's signals from the log
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_signals = [
+            s for s in report.get("recent", [])
+            if s.get("fired_at", "").startswith(today_str)
+        ]
+
+        if not today_signals:
+            log.info("Daily X recap: no signals today, skipping")
+            return
+
+        # Count directions
+        bullish = sum(1 for s in today_signals if s.get("direction") == "LONG")
+        bearish = sum(1 for s in today_signals if s.get("direction") == "SHORT")
+
+        # Get top signal (highest absolute score)
+        top_sig = max(today_signals, key=lambda s: abs(s.get("score", 0)))
+        top_score = top_sig.get("score", 0)
+        top_dir = "BULLISH" if top_score > 0 else "BEARISH"
+        top_theme = top_sig.get("extra", {}).get("post_theme", "")
+        theme_str = top_theme.replace("_", " ").title() if top_theme else ""
+
+        # Get current price
+        price = _fetch_hyperliquid_price("xyz:CL")
+        price_str = f"${price:.2f}" if price else ""
+
+        # Get accuracy
+        w1h = report.get("by_window", {}).get("1h", {})
+        acc_str = ""
+        if w1h.get("total", 0) >= 3:
+            acc_str = f"\n📊 1h accuracy: {w1h['hit_rate']:.0%} ({w1h['correct']}/{w1h['total']})"
+
+        # Check for price move on top signal
+        move_str = ""
+        checks = top_sig.get("checks", {})
+        for w in ["1h", "15m"]:
+            c = checks.get(w)
+            if c:
+                move_str = f", WTI moved {c['pct_change']:+.1f}%"
+                break
+
+        # Build tweet
+        tweet = (
+            f"📡 Today's Oil Signals\n\n"
+            f"🛢 WTI: {price_str}\n"
+            f"📊 {len(today_signals)} signals: {bullish} bullish, {bearish} bearish\n"
+        )
+        if top_score != 0:
+            tweet += f"🔥 Top: {top_score:+d} {top_dir}"
+            if theme_str:
+                tweet += f" — {theme_str}"
+            if move_str:
+                tweet += move_str
+            tweet += "\n"
+        tweet += acc_str
+        tweet += f"\n\n🤖 Live signals: usoil.ai\n#WTI #CrudeOil #OilTrading"
+
+        # Store draft and send to admin for approval
+        draft_id = f"xrecap_{today_str}"
+        _pending_tweet_drafts[draft_id] = tweet
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Post to X", callback_data=f"tweet_approve:{draft_id}"),
+                InlineKeyboardButton("❌ Skip", callback_data=f"tweet_reject:{draft_id}"),
+            ]
+        ])
+
+        for uid in ADMIN_USER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📝 *Daily X Recap Draft*\n\n```\n{tweet}\n```\n\nApprove to post?",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                log.exception("Failed to send X recap draft to admin %s", uid)
+
+    except Exception:
+        log.exception("Daily X recap draft failed")
+
+
+async def handle_tweet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle approve/reject buttons for tweet drafts."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id not in ADMIN_USER_IDS:
+        return
+
+    data = query.data or ""
+
+    if data.startswith("tweet_approve:"):
+        draft_id = data.split(":", 1)[1]
+        tweet_text = _pending_tweet_drafts.pop(draft_id, None)
+        if not tweet_text:
+            await query.edit_message_text("⚠️ Draft expired or already handled.")
+            return
+
+        # Post to X
+        client, _ = _get_twitter_client()
+        if not client:
+            await query.edit_message_text("❌ Twitter client not configured.")
+            return
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: client.create_tweet(text=tweet_text))
+            await query.edit_message_text(f"✅ *Posted to X!*\n\n```\n{tweet_text}\n```", parse_mode="Markdown")
+            log.info("Daily X recap posted (approved by admin)")
+        except Exception as exc:
+            await query.edit_message_text(f"❌ Tweet failed: {exc}")
+            log.error("Daily X recap tweet failed: %s", exc)
+
+    elif data.startswith("tweet_reject:"):
+        draft_id = data.split(":", 1)[1]
+        _pending_tweet_drafts.pop(draft_id, None)
+        await query.edit_message_text("⏭ Recap skipped.")
+        log.info("Daily X recap skipped by admin")
+
+
 async def rolling_forecast(context: ContextTypes.DEFAULT_TYPE):
     """Run a rolling 16-day WTI forecast every 12 hours.
 
@@ -2964,6 +3103,9 @@ async def main_async():
     ptb_app.add_handler(CommandHandler("info",         cmd_info))
     ptb_app.add_handler(CommandHandler("api",          cmd_api))
 
+    from telegram.ext import CallbackQueryHandler
+    ptb_app.add_handler(CallbackQueryHandler(handle_tweet_callback, pattern=r"^tweet_(approve|reject):"))
+
     ptb_app.job_queue.run_repeating(check_price_alerts,  interval=300,    first=15)
     ptb_app.job_queue.run_repeating(check_volume_spike,        interval=300,  first=30)
     ptb_app.job_queue.run_repeating(check_volume_hyperliquid, interval=60,   first=15)
@@ -2981,6 +3123,11 @@ async def main_async():
     # Daily blog recap — 5:00pm ET (22:00 UTC), 1h after CME close
     ptb_app.job_queue.run_daily(generate_daily_blog_recap, time=datetime.now(et).replace(
         hour=17, minute=0, second=0, microsecond=0
+    ).timetz())
+
+    # Daily X recap — 5:15pm ET, draft sent to admin for approval
+    ptb_app.job_queue.run_daily(generate_daily_x_recap, time=datetime.now(et).replace(
+        hour=17, minute=15, second=0, microsecond=0
     ).timetz())
 
     # Build aiohttp webhook server
