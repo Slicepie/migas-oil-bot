@@ -8,3 +8,6 @@ pytz>=2024.1
 anthropic>=0.25.0
 websockets>=13.0
 tweepy>=4.14.0
+sseclient-py>=1.8.0
+hyperliquid-python-sdk>=0.9.0
+eth-account>=0.13.0

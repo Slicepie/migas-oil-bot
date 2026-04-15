@@ -18,9 +18,17 @@ cp /tmp/repo/telegram/llm_score.py           /app/llm_score.py
 cp /tmp/repo/telegram/truthsocial_poller.py  /app/truthsocial_poller.py
 cp /tmp/repo/telegram/hormuz_monitor.py      /app/hormuz_monitor.py
 cp /tmp/repo/telegram/trader.py              /app/trader.py 2>/dev/null || true
+cp /tmp/repo/telegram/requirements.txt       /tmp/repo_requirements.txt 2>/dev/null || true
 rm -rf /tmp/repo
 
 echo "[startup] Code updated."
+
+# Install/update Python deps (in case new ones were added without Docker rebuild)
+echo "[startup] Installing Python dependencies..."
+pip install --quiet --no-cache-dir -r /tmp/repo_requirements.txt 2>&1 | tail -5 || \
+    pip install --quiet --no-cache-dir sseclient-py hyperliquid-python-sdk eth-account 2>&1 | tail -5
+
+echo "[startup] Dependencies ready."
 
 # ─── Auto-start Hyperliquid trader (if HL_SECRET_KEY is set) ────────────────
 if [ -n "$HL_SECRET_KEY" ]; then
