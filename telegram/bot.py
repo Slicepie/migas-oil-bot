@@ -1909,7 +1909,7 @@ async def trigger_auto_forecast(context: ContextTypes.DEFAULT_TYPE, post: dict):
                     score         = sc,
                     direction     = "BULLISH" if sc > 0 else "BEARISH",
                     trigger_post  = text[:500],
-                    signals       = list(post.get("signals", {}).keys()),
+                    signals       = list(post.get("signals", {}).keys()) if isinstance(post.get("signals"), dict) else list(post.get("signals") or []),
                     pred_len      = AUTO_FORECAST_PRED_LEN,
                 )
 
@@ -2468,17 +2468,7 @@ async def check_volume_hyperliquid(context: ContextTypes.DEFAULT_TYPE):
                 log.exception("Failed to send HL volume alert to %s", uid)
 
         # Volume spikes no longer tweeted — Telegram only
-
-        context.job_queue.run_once(
-            _volume_direction_check,
-            when=300,
-            data={
-                "entry_price": current_px,
-                "ratio": round(delta_m, 1),
-                "insider_flag": insider_flag,
-                "signal_id": signal_id,
-            },
-        )
+        # Direction follow-up removed — single alert only
 
         log.info("HL volume spike: $%.1fM in %.0f min, price $%.2f, Trump post %.0f min ago",
                  delta_m, interval_min, current_px, post_age_min)
@@ -2589,20 +2579,8 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("Failed to send volume alert to %s", uid)
 
-        # Tweet volume spike (async, after Telegram)
         # Volume spikes no longer tweeted — Telegram only
-
-        # Schedule 5-min direction check
-        context.job_queue.run_once(
-            _volume_direction_check,
-            when=300,
-            data={
-                "entry_price": current_px,
-                "ratio": round(ratio, 2),
-                "insider_flag": insider_flag,
-                "signal_id": signal_id,
-            },
-        )
+        # Direction follow-up removed — single alert only
 
     except Exception:
         log.exception("Volume spike check failed")
