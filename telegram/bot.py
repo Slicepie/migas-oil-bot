@@ -106,16 +106,26 @@ MAX_SSE_PER_IP        = 3         # max connections per IP address
 def sse_push(market: str, event: dict) -> None:
     """Push an event to all SSE clients subscribed to a market. Non-blocking."""
     clients = _sse_clients.get(market, set())
+    if not clients:
+        log.warning("SSE push for %s — NO CLIENTS connected (event: score=%s, dir=%s)",
+                    market, event.get("data", {}).get("score"),
+                    event.get("data", {}).get("direction"))
+        return
     dead: list[asyncio.Queue] = []
+    pushed = 0
     for q in clients:
         try:
             q.put_nowait(event)
+            pushed += 1
         except asyncio.QueueFull:
+            log.warning("SSE queue full for one %s client — dropping", market)
             dead.append(q)
     for q in dead:
         clients.discard(q)
-    if clients:
-        log.info("SSE pushed to %d %s clients", len(clients), market)
+    log.info("SSE pushed to %d/%d %s clients (score=%s, dir=%s)",
+             pushed, len(clients), market,
+             event.get("data", {}).get("score"),
+             event.get("data", {}).get("direction"))
 
 
 def sse_push_signal(all_markets: dict, meta: dict, prices: dict,
