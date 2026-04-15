@@ -31,7 +31,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from news import (
     build_live_summary, build_live_summary_override, get_relevant_trump_posts, refresh_cache,
-    score_emoji, append_new_posts, _score_raw_posts, get_scored_posts,
+    score_emoji, append_new_posts, _score_raw_posts, get_scored_posts, _read_cache,
     analogue_signal, format_analogue_signal, net_signal_text,
     is_oil_topic,
 )
@@ -101,6 +101,65 @@ _sse_clients: dict[str, set[asyncio.Queue]] = {}  # market -> set of queues
 _sse_ip_count: dict[str, int] = {}                # IP -> active connection count
 MAX_SSE_CLIENTS_TOTAL = 200       # hard cap across all markets
 MAX_SSE_PER_IP        = 3         # max connections per IP address
+
+# ---------------------------------------------------------------------------
+# Public REST API — signal & volume history + rate limiting
+# ---------------------------------------------------------------------------
+# In-memory ring buffers feeding the /api/v1/* endpoints consumed by the
+# Hermes / Claude Code / MCP skills. Free tier, no auth.
+_signal_history:        list[dict] = []      # recent signals (newest first)
+_volume_spike_history:  list[dict] = []      # recent volume spikes (newest first)
+MAX_SIGNAL_HISTORY        = 200              # ~1 week of signals at current cadence
+MAX_VOLUME_SPIKE_HISTORY  = 100
+
+# Per-IP rate limiting for /api/v1/* (separate from SSE connection cap)
+_api_rate_limit:     dict[str, list[float]] = {}   # IP -> recent call timestamps
+API_RATE_LIMIT_WINDOW_SEC = 60
+API_RATE_LIMIT_MAX        = 30       # 30 req / min / IP across all public endpoints
+
+# Short-TTL cache for posts file reads so burst traffic doesn't re-parse JSON
+_posts_cache_ttl: tuple[list[dict], float] | None = None
+POSTS_CACHE_TTL_SEC = 5
+
+
+def _cached_posts() -> list[dict]:
+    """Return scored posts from in-memory cache (5s TTL) to avoid repeated disk reads."""
+    import time as _t
+    global _posts_cache_ttl
+    now = _t.time()
+    if _posts_cache_ttl and now - _posts_cache_ttl[1] < POSTS_CACHE_TTL_SEC:
+        return _posts_cache_ttl[0]
+    posts = _read_cache()
+    _posts_cache_ttl = (posts, now)
+    return posts
+
+
+def _api_rate_check(client_ip: str, bucket: dict, window_sec: int, max_calls: int) -> bool:
+    """Return True if IP is within rate limit, False if exceeded. Records the call on success."""
+    import time as _t
+    now = _t.time()
+    hits = bucket.get(client_ip, [])
+    hits = [t for t in hits if now - t < window_sec]
+    if len(hits) >= max_calls:
+        bucket[client_ip] = hits
+        return False
+    hits.append(now)
+    bucket[client_ip] = hits
+    return True
+
+
+def _record_signal_history(event: dict) -> None:
+    """Append a signal event to the in-memory history ring buffer."""
+    _signal_history.insert(0, event)
+    if len(_signal_history) > MAX_SIGNAL_HISTORY:
+        del _signal_history[MAX_SIGNAL_HISTORY:]
+
+
+def _record_volume_spike(entry: dict) -> None:
+    """Append a volume-spike event to the history ring buffer."""
+    _volume_spike_history.insert(0, entry)
+    if len(_volume_spike_history) > MAX_VOLUME_SPIKE_HISTORY:
+        del _volume_spike_history[MAX_VOLUME_SPIKE_HISTORY:]
 
 
 def sse_push(market: str, event: dict) -> None:
@@ -174,6 +233,7 @@ def sse_push_signal(all_markets: dict, meta: dict, prices: dict,
             "suggested_sl":   suggested_sl,
             "suggested_tp":   suggested_tp,
         }
+        _record_signal_history(event)
         sse_push(market, event)
 
 # Twitter/X — async posting after Telegram (never blocks signal speed)
@@ -422,7 +482,7 @@ def fetch_price_with_fallback(yf_ticker: str) -> float | None:
 # ---------------------------------------------------------------------------
 # Volume spike detection config
 # ---------------------------------------------------------------------------
-VOLUME_SPIKE_MULTIPLIER  = 1.5    # alert if current 5-min vol > 1.5x hourly baseline
+VOLUME_SPIKE_MULTIPLIER  = 4.0    # alert if current 5-min vol > 4x hourly baseline
 VOLUME_BASELINE_DAYS     = 14     # days of hourly history to build baseline
 VOLUME_COOLDOWN_MIN      = 30     # minimum minutes between volume spike alerts
 
@@ -2462,6 +2522,18 @@ async def check_volume_hyperliquid(context: ContextTypes.DEFAULT_TYPE):
             price_at_alert = current_px,
         )
 
+        _record_volume_spike({
+            "signal_id":     signal_id or f"vol_hl_{int(now.timestamp())}",
+            "ts":            now.isoformat(),
+            "source":        "hyperliquid",
+            "ratio":         None,                     # HL tracker uses $-delta, not ratio
+            "delta_ntl_m":   round(delta_m, 1),
+            "interval_min":  round(interval_min, 1),
+            "price":         current_px,
+            "post_age_min":  round(post_age_min, 1),
+            "insider_flag":  insider_flag,
+        })
+
         insider_label = "\n🚨 *INSIDER FLAG* — no Trump post before spike" if insider_flag else ""
         msg = (
             f"⚡ *Volume Spike — Hyperliquid WTI* (off-hours)\n\n"
@@ -2491,7 +2563,7 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
     """Check CL=F 5-min volume for unusual spikes (CME hours only).
 
     Fires an alert if:
-    1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER (1.5x) × hourly baseline
+    1. Current 5-min volume > VOLUME_SPIKE_MULTIPLIER (4x) × hourly baseline
     2. Cooldown since last volume alert has passed
 
     Always fires regardless of Trump post — instead reports post context in message.
@@ -2567,6 +2639,19 @@ async def check_volume_spike(context: ContextTypes.DEFAULT_TYPE):
             signal_type    = "volume_spike",
             price_at_alert = current_px,
         )
+
+        _record_volume_spike({
+            "signal_id":     signal_id or f"vol_{int(now.timestamp())}",
+            "ts":            now.isoformat(),
+            "source":        "cme",
+            "ratio":         round(ratio, 2),
+            "volume":        current_vol,
+            "baseline":      round(avg_vol, 0),
+            "notional_m":    round(notional_m, 0),
+            "price":         current_px,
+            "post_age_min":  round(post_age_min, 1),
+            "insider_flag":  insider_flag,
+        })
 
         log.info("Volume spike detected: %.1fx baseline (%.0f vs %.0f avg), $%.0fM notional, Trump post %.0f min ago",
                  ratio, current_vol, avg_vol, notional_m, post_age_min)
@@ -2753,6 +2838,279 @@ async def handle_stream_stats(request: web.Request) -> web.Response:
             "max_per_ip": MAX_SSE_PER_IP,
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Public REST API (v1) — consumed by the Hermes / Claude Code `usoil` skill
+# ---------------------------------------------------------------------------
+# All endpoints are free, no auth. Rate-limited per IP via _api_rate_check.
+# Scoring endpoint is additionally daily-limited (it costs Anthropic tokens).
+
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin":  "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+}
+
+
+def _client_ip(request: web.Request) -> str:
+    return (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote
+        or "unknown"
+    )
+
+
+def _rate_limited_response(retry_after: int = 60) -> web.Response:
+    return web.json_response(
+        {"error": "Rate limit exceeded", "retry_after_sec": retry_after},
+        status=429,
+        headers=_CORS_HEADERS,
+    )
+
+
+def _post_timestamp_utc(post: dict) -> datetime | None:
+    """Parse a post's date + time_et into a UTC datetime for filtering."""
+    date_str = post.get("date") or ""
+    time_str = post.get("time_et") or "00:00:00"
+    if not date_str:
+        return None
+    try:
+        import pytz as _pytz
+        dt_naive = datetime.fromisoformat(f"{date_str}T{time_str}")
+        et = _pytz.timezone("America/New_York")
+        return et.localize(dt_naive).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+async def handle_api_posts_recent(request: web.Request) -> web.Response:
+    """GET /api/v1/posts/recent?hours=24&min_score=1
+    Returns scored Trump posts from the last N hours.
+    """
+    if not _api_rate_check(_client_ip(request), _api_rate_limit,
+                           API_RATE_LIMIT_WINDOW_SEC, API_RATE_LIMIT_MAX):
+        return _rate_limited_response()
+
+    try:
+        hours     = max(1, min(int(request.query.get("hours", "24") or "24"), 720))
+        min_score = abs(int(request.query.get("min_score", "0") or "0"))
+    except ValueError:
+        return web.json_response({"error": "Bad query params"}, status=400, headers=_CORS_HEADERS)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    posts  = _cached_posts()
+    recent = []
+    for p in posts:
+        ts = _post_timestamp_utc(p)
+        if ts is None or ts < cutoff:
+            continue
+        if abs(p.get("score") or 0) < min_score:
+            continue
+        recent.append({
+            "ts":         ts.isoformat(),
+            "date":       p.get("date"),
+            "time_et":    p.get("time_et"),
+            "text":       p.get("text"),
+            "score":      p.get("score"),
+            "signals":    p.get("signals", []),
+            "url":        p.get("url"),
+            "confirmed":  p.get("confirmed", False),
+            "uso_pct_5m": p.get("uso_pct_5m"),
+            "uso_pct_1h": p.get("uso_pct_1h"),
+        })
+
+    recent.sort(key=lambda x: x["ts"], reverse=True)
+    return web.json_response({
+        "window_hours": hours,
+        "count":        len(recent),
+        "posts":        recent,
+    }, headers=_CORS_HEADERS)
+
+
+async def handle_api_market_bias(request: web.Request) -> web.Response:
+    """GET /api/v1/market/bias?market=OIL&hours=6
+    Returns an aggregate directional bias from recent signals.
+    """
+    if not _api_rate_check(_client_ip(request), _api_rate_limit,
+                           API_RATE_LIMIT_WINDOW_SEC, API_RATE_LIMIT_MAX):
+        return _rate_limited_response()
+
+    market = request.query.get("market", "OIL").upper()
+    try:
+        hours = max(1, min(int(request.query.get("hours", "6") or "6"), 168))
+    except ValueError:
+        return web.json_response({"error": "Bad hours"}, status=400, headers=_CORS_HEADERS)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    bullish = bearish = 0
+    scores:  list[int]  = []
+    latest_ts: str | None = None
+    for ev in _signal_history:
+        if ev.get("market") != market:
+            continue
+        try:
+            ev_ts = datetime.fromisoformat(ev.get("ts", "").replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ev_ts < cutoff:
+            continue
+        latest_ts = latest_ts or ev["ts"]
+        s = int(ev.get("data", {}).get("score", 0))
+        scores.append(s)
+        if s > 0:
+            bullish += 1
+        elif s < 0:
+            bearish += 1
+
+    if scores:
+        avg = sum(scores) / len(scores)
+        if avg > 0.5:
+            direction = "BULLISH"
+        elif avg < -0.5:
+            direction = "BEARISH"
+        else:
+            direction = "NEUTRAL"
+    else:
+        avg = 0.0
+        direction = "NO_DATA"
+
+    return web.json_response({
+        "market":       market,
+        "window_hours": hours,
+        "signal_count": len(scores),
+        "bullish":      bullish,
+        "bearish":      bearish,
+        "avg_score":    round(avg, 2),
+        "direction":    direction,
+        "latest_ts":    latest_ts,
+    }, headers=_CORS_HEADERS)
+
+
+async def handle_api_market_price(request: web.Request) -> web.Response:
+    """GET /api/v1/market/price?symbol=CL
+    Returns the live Hyperliquid perp mid price (5–10s cached).
+    """
+    if not _api_rate_check(_client_ip(request), _api_rate_limit,
+                           API_RATE_LIMIT_WINDOW_SEC, API_RATE_LIMIT_MAX):
+        return _rate_limited_response()
+
+    symbol = request.query.get("symbol", "CL").upper()
+    hl_symbol = {
+        "CL": "xyz:CL",
+        "WTI": "xyz:CL",
+        "BRENT": "xyz:BRENTOIL",
+        "BZ": "xyz:BRENTOIL",
+    }.get(symbol, f"xyz:{symbol}")
+
+    # Off-load sync requests.post() to a thread so the event loop stays free for SSE
+    price = await asyncio.to_thread(_fetch_hyperliquid_price, hl_symbol)
+    if price is None:
+        return web.json_response(
+            {"error": "Price unavailable", "symbol": symbol, "hl_symbol": hl_symbol},
+            status=503, headers=_CORS_HEADERS,
+        )
+
+    return web.json_response({
+        "symbol":    symbol,
+        "hl_symbol": hl_symbol,
+        "price":     price,
+        "source":    "hyperliquid",
+        "ts":        datetime.now(timezone.utc).isoformat(),
+    }, headers=_CORS_HEADERS)
+
+
+async def handle_api_volume_spikes(request: web.Request) -> web.Response:
+    """GET /api/v1/volume/spikes?hours=24
+    Returns recent volume-spike events (4x baseline on CME, $5M on HL).
+    """
+    if not _api_rate_check(_client_ip(request), _api_rate_limit,
+                           API_RATE_LIMIT_WINDOW_SEC, API_RATE_LIMIT_MAX):
+        return _rate_limited_response()
+
+    try:
+        hours = max(1, min(int(request.query.get("hours", "24") or "24"), 720))
+    except ValueError:
+        return web.json_response({"error": "Bad hours"}, status=400, headers=_CORS_HEADERS)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    out: list[dict] = []
+    for entry in _volume_spike_history:
+        try:
+            ts = datetime.fromisoformat(entry.get("ts", "").replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ts < cutoff:
+            continue
+        out.append(entry)
+
+    return web.json_response({
+        "window_hours": hours,
+        "threshold":    f"{VOLUME_SPIKE_MULTIPLIER:.1f}x baseline (CME) / ${HL_VOLUME_SPIKE_THRESHOLD_M:.0f}M delta (HL)",
+        "count":        len(out),
+        "spikes":       out,
+    }, headers=_CORS_HEADERS)
+
+
+async def handle_api_trade_idea(request: web.Request) -> web.Response:
+    """POST /api/v1/trade/idea    body: {"market": "OIL", "size_usd": 50}  (optional)
+    Returns a trade idea based on the latest in-memory OIL signal.
+    Does NOT execute — this is a suggestion, not an order.
+    """
+    if not _api_rate_check(_client_ip(request), _api_rate_limit,
+                           API_RATE_LIMIT_WINDOW_SEC, API_RATE_LIMIT_MAX):
+        return _rate_limited_response()
+
+    try:
+        body = await request.json() if request.can_read_body else {}
+    except Exception:
+        body = {}
+
+    market   = (body or {}).get("market", "OIL").upper()
+    size_usd = float((body or {}).get("size_usd", 50) or 50)
+    size_usd = max(10.0, min(size_usd, 10_000.0))
+
+    latest = next((ev for ev in _signal_history if ev.get("market") == market), None)
+    if not latest:
+        return web.json_response({
+            "market":  market,
+            "status":  "no_signal",
+            "message": "No recent signal for this market. Wait for the next SSE event.",
+        }, headers=_CORS_HEADERS)
+
+    data      = latest.get("data", {})
+    score     = int(data.get("score", 0))
+    direction = data.get("direction", "NEUTRAL")
+    if direction == "NEUTRAL" or score == 0:
+        return web.json_response({
+            "market":  market,
+            "status":  "neutral",
+            "message": "Latest signal is neutral — no directional trade.",
+            "signal":  {"ts": latest.get("ts"), "score": score, "direction": direction},
+        }, headers=_CORS_HEADERS)
+
+    price        = latest.get("price") or _fetch_hyperliquid_price("xyz:CL")
+    suggested_sl = latest.get("suggested_sl")
+    suggested_tp = latest.get("suggested_tp")
+
+    return web.json_response({
+        "market":       market,
+        "status":       "idea",
+        "direction":    direction,
+        "score":        score,
+        "confidence":   data.get("confidence"),
+        "size_usd":     size_usd,
+        "entry_hint":   price,
+        "stop_loss":    suggested_sl,
+        "take_profit":  suggested_tp,
+        "hold_window":  latest.get("hold_window"),
+        "hit_rate":     latest.get("hit_rate"),
+        "post_theme":   latest.get("post_theme"),
+        "rationale":    data.get("rationale", ""),
+        "signal_ts":    latest.get("ts"),
+        "execute_link": "https://app.hyperliquid.xyz/trade/CL",
+        "disclaimer":   "Informational only. Not investment advice. Execute at your own risk.",
+    }, headers=_CORS_HEADERS)
 
 
 # ---------------------------------------------------------------------------
@@ -3208,6 +3566,13 @@ async def main_async():
     aio_app.router.add_get("/signal",            handle_signal_api)
     aio_app.router.add_get("/stream/stats",       handle_stream_stats)
     aio_app.router.add_get("/stream/{market}",   handle_sse_stream)
+
+    # Public v1 REST API — consumed by the Hermes/Claude Code `usoil` skill
+    aio_app.router.add_get("/api/v1/posts/recent",   handle_api_posts_recent)
+    aio_app.router.add_get("/api/v1/market/bias",    handle_api_market_bias)
+    aio_app.router.add_get("/api/v1/market/price",   handle_api_market_price)
+    aio_app.router.add_get("/api/v1/volume/spikes",  handle_api_volume_spikes)
+    aio_app.router.add_post("/api/v1/trade/idea",    handle_api_trade_idea)
 
     runner = web.AppRunner(aio_app)
     await runner.setup()

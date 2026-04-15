@@ -25,7 +25,7 @@ import threading
 from datetime import datetime, timezone
 
 import requests
-import sseclient
+import sseclient  # pip install sseclient-py
 import eth_account
 from eth_account.signers.local import LocalAccount
 from hyperliquid.exchange import Exchange
@@ -35,8 +35,8 @@ from hyperliquid.utils import constants
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 SECRET_KEY      = os.environ.get("HL_SECRET_KEY", "")
-WALLET          = os.environ.get("HL_WALLET", "")
-ACCOUNT         = os.environ.get("HL_ACCOUNT", "") or WALLET
+WALLET          = os.environ.get("HL_WALLET", "").lower()
+ACCOUNT         = (os.environ.get("HL_ACCOUNT", "") or WALLET).lower()
 STREAM_URL      = os.environ.get("STREAM_URL", "http://localhost:8080/stream/OIL")
 TRADE_SIZE_USD  = float(os.environ.get("TRADE_SIZE_USD", "20"))
 MAX_POSITION_USD = float(os.environ.get("MAX_POSITION_USD", "100"))
