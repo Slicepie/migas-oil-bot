@@ -2,7 +2,7 @@
 # Shared lib for usoil skill scripts. Sourced by each helper.
 # Exports USOIL_API and a `uapi` helper for GET/POST.
 
-USOIL_API="${USOIL_API_BASE:-http://103.196.86.91:34412}"
+USOIL_API="${USOIL_API_BASE:-http://api.usoil.ai:34412}"
 
 # Usage: uapi GET /api/v1/posts/recent?hours=24
 #        uapi POST /api/v1/trade/idea '{"market":"OIL"}'

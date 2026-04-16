@@ -25,7 +25,7 @@ Do **not** invoke for equity, crypto, nat-gas, or non-oil questions.
 The skill calls a REST API. Base URL default:
 
 ```
-http://103.196.86.91:34412
+http://api.usoil.ai:34412
 ```
 
 Users can override with `USOIL_API_BASE` env var. All endpoints are free, no auth. Rate-limited at 30 requests/minute per IP.

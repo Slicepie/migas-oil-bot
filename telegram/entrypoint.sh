@@ -30,6 +30,35 @@ pip install --quiet --no-cache-dir -r /tmp/repo_requirements.txt 2>&1 | tail -5 
 
 echo "[startup] Dependencies ready."
 
+# ─── Auto-start Cloudflare Tunnel (if CLOUDFLARE_TUNNEL_TOKEN is set) ───────
+# Exposes the bot's port 8080 at https://api.usoil.ai with stable TLS even
+# when the RunPod IP / TCP port changes. One-time dashboard setup:
+#   1. Cloudflare → Zero Trust → Networks → Tunnels → Create tunnel
+#   2. Add public hostname: api.usoil.ai → http://localhost:8080
+#   3. Copy the install token; set CLOUDFLARE_TUNNEL_TOKEN in RunPod env vars
+if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo "[startup] Installing cloudflared..."
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64)  CF_ARCH="amd64" ;;
+            aarch64) CF_ARCH="arm64" ;;
+            *)       CF_ARCH="amd64" ;;
+        esac
+        curl -fsSL -o /usr/local/bin/cloudflared \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+        chmod +x /usr/local/bin/cloudflared
+        echo "[startup] cloudflared installed: $(cloudflared --version 2>&1 | head -1)"
+    fi
+
+    echo "[startup] Starting Cloudflare Tunnel in background..."
+    nohup cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
+        > /app/cloudflared.log 2>&1 &
+    echo "[startup] Tunnel started (log: /app/cloudflared.log)"
+else
+    echo "[startup] CLOUDFLARE_TUNNEL_TOKEN not set — skipping tunnel (using raw TCP port)"
+fi
+
 # ─── Auto-start Hyperliquid trader (if HL_SECRET_KEY is set) ────────────────
 if [ -n "$HL_SECRET_KEY" ]; then
     echo "[startup] HL_SECRET_KEY detected — starting trader in background..."
