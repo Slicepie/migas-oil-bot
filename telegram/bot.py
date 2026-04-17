@@ -1363,28 +1363,24 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔌 *USOIL Signal API*\n\n"
-        "*SSE Stream (free):*\n"
-        "`curl -N http://api.usoil.ai:40834/stream/OIL`\n\n"
-        "*Events:*\n"
-        "• `connected` — on connect\n"
-        "• `signal` — new signal (non-zero only)\n"
-        "• `heartbeat` — every 25s\n\n"
-        "*Filters:*\n"
-        "`?min_score=3&direction=BULLISH`\n\n"
-        "*Python:*\n"
-        "```python\n"
-        "import requests, json\n"
-        "r = requests.get(\n"
-        '    "http://api.usoil.ai:40834/stream/OIL",\n'
-        "    stream=True\n"
-        ")\n"
-        "for line in r.iter_lines():\n"
-        '    if line.startswith(b"data: "):\n'
-        "        sig = json.loads(line[6:])\n"
-        '        print(sig["data"]["direction"])\n'
+        "🔌 *USOIL Free Public API*\n\n"
+        "Base URL: `https://api.usoil.ai`\n"
+        "Free · No auth · 30 req/min/IP\n\n"
+        "*REST endpoints:*\n"
+        "• `GET  /api/v1/posts/recent` — scored Trump posts\n"
+        "• `GET  /api/v1/market/bias` — aggregate signal bias\n"
+        "• `GET  /api/v1/market/price` — live HL WTI mid\n"
+        "• `GET  /api/v1/volume/spikes` — volume events\n"
+        "• `POST /api/v1/trade/idea` — trade recommendation\n\n"
+        "*Real-time stream (SSE):*\n"
+        "`curl -N https://api.usoil.ai/stream/OIL`\n\n"
+        "*Try it:*\n"
+        "```bash\n"
+        "curl https://api.usoil.ai/api/v1/market/price\n"
         "```\n\n"
-        "Full docs: [usoil.ai/docs/api](https://www.usoil.ai/docs/api)",
+        "*Claude Code / Hermes skill:*\n"
+        "[github.com/Slicepie/migas-oil-bot/tree/main/hermes-skill]"
+        "(https://github.com/Slicepie/migas-oil-bot/tree/main/hermes-skill)",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -3416,7 +3412,9 @@ async def _process_webhook_posts_inner(ptb_app: Application, raw_posts: list) ->
 
         alert_text += (
             "\n\n—\n"
-            "🛢 OIL trader API access: [www.usoil.ai](https://www.usoil.ai)"
+            "🛢 [usoil.ai](https://www.usoil.ai) · "
+            "📡 Free API: `api.usoil.ai` · "
+            "🤖 `/api`"
         )
 
         for uid in ALLOWED_USER_IDS:
