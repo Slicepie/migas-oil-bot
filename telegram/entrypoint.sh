@@ -83,4 +83,9 @@ else
 fi
 
 echo "[startup] Starting bot..."
-exec python -u bot.py
+# Rotate previous log on each fresh start so it doesn't grow unbounded
+if [ -f /app/bot.log ]; then
+    mv /app/bot.log /app/bot.log.prev
+fi
+# tee to /app/bot.log AND stdout (so RunPod also sees it)
+exec python -u bot.py 2>&1 | tee -a /app/bot.log

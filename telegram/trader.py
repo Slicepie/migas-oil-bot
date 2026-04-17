@@ -313,6 +313,8 @@ def listen_stream():
                     continue
 
                 if event.event == "signal":
+                    # Log raw event arrival BEFORE parsing so we have evidence the signal reached us
+                    log.info("SSE event received (%d bytes): %s", len(event.data or ""), (event.data or "")[:300])
                     try:
                         sig = json.loads(event.data)
                         data = sig.get("data", {})
@@ -331,6 +333,11 @@ def listen_stream():
 
                         if direction != "NEUTRAL" and abs(score) >= MIN_SCORE:
                             execute_trade(score, direction, theme, price)
+                        else:
+                            log.info(
+                                "SKIP trade: direction=%s score=%+d (threshold=±%d, must be non-NEUTRAL)",
+                                direction, score, MIN_SCORE,
+                            )
 
                     except json.JSONDecodeError:
                         log.warning("Bad signal JSON: %s", event.data[:200])
